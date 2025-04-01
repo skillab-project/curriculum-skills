@@ -8,22 +8,8 @@ from thefuzz import fuzz, process
 from output import print_loading_line
 from helpers import is_cached, load_cache, save_cache, contains_no_lowercase_letters, clean_lesson_name, contains_greek_characters
 from output import print_colored_text, print_green_line
-import nltk
-from nltk.corpus import words
 
 from concurrent.futures import ThreadPoolExecutor
-
-try:
-    nltk.data.find('corpora/words.zip')
-except LookupError:
-    nltk.download('words')
-
-valid_words = set(words.words())
-
-def contains_real_words(text):
-    """Check if the text contains at least one valid English word."""
-    word_list = text.split()
-    return any(word.lower() in valid_words for word in word_list)
 
 
 def download_pdf(url: str, save_path: str) -> str:
