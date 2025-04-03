@@ -9,6 +9,7 @@ class TestExtractedSkills(unittest.TestCase):
     @patch("main.calculate_skillnames")
     @patch("main.process_pdf")
     def test_compare_extracted_skills(self, mock_process_pdf, mock_calculate_skillnames):
+        print("test")
         with open("tests/json/extracted_skills_expected.json", "r", encoding="utf-8") as f:
             expected = json.load(f)
 
