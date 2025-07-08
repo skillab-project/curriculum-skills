@@ -181,6 +181,7 @@ Here are the most important methods across the codebase explained for better und
 
 ### `helpers.py`
 
+
 - **`find_possible_university(pdf_file_path)`**: Scans PDF content using regex to guess the university name.
 - **`load_from_cache(university_name)` / `save_to_cache(...)`**: Manages university-specific cache JSONs.
 - **`contains_greek_characters(...)` / `contains_no_lowercase_letters(...)`**: Utilities used in filtering invalid lesson names.
