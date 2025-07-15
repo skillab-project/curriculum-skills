@@ -14,7 +14,7 @@ services:
       - DB_HOST=db
       - DB_USER=${MYSQL_USER}
       - DB_PASSWORD=${MYSQL_PASSWORD}
-      - DB_NAME=${MYSQL_DATABASE}
+      - DB_NAME=${MYSQL_DATABASE} # This should be set to SkillCrawl in your .env file
     depends_on:
       - db
     labels:
@@ -33,6 +33,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
     volumes:
+      - ./skillcrawl.sql:/docker-entrypoint-initdb.d/init.sql
       - mysql_config:/etc/mysql/my.cnf
       - mysql_data:/var/lib/mysql
     labels:
@@ -43,7 +44,6 @@ volumes:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
   mysql_config:
-  skillcrawl_sql:
   mysql_data:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
