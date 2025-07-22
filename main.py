@@ -21,6 +21,18 @@ import psycopg2
 import mysql.connector
 from concurrent.futures import ThreadPoolExecutor
 import requests
+from datetime import datetime
+from pathlib import Path
+from pydantic import BaseModel
+from typing import List, Dict
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.cluster import KMeans
+        
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+
+
 
 skill_extractor = SkillExtractor()
 
@@ -33,6 +45,35 @@ else:
     university_cache = {}
 
 app = FastAPI(title="SkillCrawl API", description="API for skill extraction and course search.")
+
+
+class CountryUniversities(BaseModel):
+    country: str
+    universities: int
+
+class SkillPerCountry(BaseModel):
+    skill: str
+    frequency: int
+
+class SkillsByCountry(BaseModel):
+    country: str
+    skills: List[SkillPerCountry]
+
+class MonthlyTrend(BaseModel):
+    month: str
+    count: int
+
+class CountryTrend(BaseModel):
+    country: str
+    monthly_counts: List[MonthlyTrend]
+
+class ClusterResult(BaseModel):
+    cluster: int
+    universities: List[str]
+    
+class SkillFrequency(BaseModel):
+    skill: str
+    frequency: int
 
 
 class CrawlRequest(BaseModel):
@@ -698,6 +739,182 @@ def save_all_to_db():
             continue
 
     return {"message": "All valid university data saved to the database successfully."}
+
+
+@app.get("/descriptive/location", response_model=List[CountryUniversities], tags=["Descriptive"], summary="Universities per Country from DB")
+def get_university_counts_by_country_db():
+    """
+    Returns number of universities per country using DB data.
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+    SELECT country, COUNT(*) AS universities
+    FROM University
+    WHERE country IS NOT NULL AND country != ''
+    GROUP BY country
+    ORDER BY universities DESC
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        return cursor.fetchall()
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/exploratory/skills_location", response_model=List[SkillsByCountry], tags=["Exploratory"], summary="Skills per Country from DB")
+def get_skills_per_location_db():
+    """
+    Country list with each country's skills and their frequency
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+    SELECT u.country, s.skill_name, COUNT(*) AS frequency
+    FROM Skills s
+    JOIN Lessons l ON s.lesson_id = l.lesson_id
+    JOIN University u ON l.university_id = u.university_id
+    WHERE s.skill_name IS NOT NULL AND s.skill_name != '' AND u.country IS NOT NULL
+    GROUP BY u.country, s.skill_name
+    ORDER BY u.country, frequency DESC
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[row["country"]].append(SkillPerCountry(skill=row["skill_name"], frequency=row["frequency"]))
+
+        return [{"country": country, "skills": skills} for country, skills in grouped.items()]
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/trend/location", response_model=List[CountryTrend], tags=["Trend"], summary="University Join Trend per Country from DB")
+def get_university_trend_per_location_db():
+    """
+    Number of universities added per month grouped by country.
+    If there's no actual date, it is based on created_at timestamps.
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+    SELECT country, DATE_FORMAT(created_at, '%Y-%m') AS month, COUNT(*) AS count
+    FROM University
+    WHERE country IS NOT NULL AND created_at IS NOT NULL
+    GROUP BY country, month
+    ORDER BY country, month
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[row["country"]].append(MonthlyTrend(month=row["month"], count=row["count"]))
+
+        return [{"country": country, "monthly_counts": counts} for country, counts in grouped.items()]
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/cluster/universities/{k}", response_model=List[ClusterResult], tags=["Clustering"], summary="University Clustering by Skills from DB")
+def cluster_universities_db(k: int):
+    """
+    Clustering universities based off skill profiles
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+    SELECT u.university_name, GROUP_CONCAT(DISTINCT s.skill_name SEPARATOR ' ') AS skills
+    FROM University u
+    JOIN Lessons l ON u.university_id = l.university_id
+    JOIN Skills s ON l.lesson_id = s.lesson_id
+    WHERE s.skill_name IS NOT NULL AND s.skill_name != ''
+    GROUP BY u.university_name
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return []
+
+        universities = [row["university_name"] for row in rows]
+        documents = [row["skills"] for row in rows]
+
+        vectorizer = CountVectorizer()
+        X = vectorizer.fit_transform(documents)
+        kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
+
+        grouped = defaultdict(list)
+        for idx, label in enumerate(kmeans.labels_):
+            grouped[int(label)].append(universities[idx])
+
+        return [{"cluster": cluster, "universities": unis} for cluster, unis in grouped.items()]
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/descriptive/skills_frequency", response_model=List[SkillFrequency], tags=["Descriptive"], summary="Skill frequency across lessons from DB")
+def get_skill_frequencies():
+    """
+    Returns a list of all skills and how many times each appears across lessons.
+    Useful for visualizations like bar plots.
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+        SELECT skill_name, COUNT(*) AS frequency
+        FROM Skills
+        WHERE skill_name IS NOT NULL AND skill_name != ''
+        GROUP BY skill_name
+        ORDER BY frequency DESC
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        results = cursor.fetchall()
+
+        return [{"skill": row["skill_name"], "frequency": row["frequency"]} for row in results]
+
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
 
 @app.post("/crawl", summary="Start a web crawl")
 def crawl_university(request: CrawlRequest):
