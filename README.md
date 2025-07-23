@@ -2,7 +2,9 @@
 
 **SkillCrawl** is a tool that helps you search into university curricula and extract important skills that students are expected to learn — all from PDF files. It uses the official **ESCO** skill framework and leverages the `esco-skill-extractor` to identify real-world competencies and link them back to course content.
 
+
 You can run it interactively in your terminal, use its web API with Swagger UI, or even connect it to a MySQL database. Whether you're doing academic research, analyzing skill trends, or building a course recommender, SkillCrawl saves you time by automating the skill detection.
+
 
 > ⚙️ **Coming soon**: An **automated web crawler** is currently under development to let you scan entire university websites for curriculum pages — no PDFs required! It’s still experimental but already crawling basic lesson data from real websites.
 
