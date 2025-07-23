@@ -25,9 +25,6 @@ pipeline {
         // *************************
         stage('Preparation') {
             steps {
-                echo "***** DEBUGGING BRANCH VARIABLES *****"
-                sh "echo 'The value of GIT_BRANCH is: ${env.GIT_BRANCH}'"
-                sh "echo 'The value of BRANCH_NAME is: ${env.BRANCH_NAME}'"
                 echo "***** Cleaning Workspace and Checking Out Code *****"
                 cleanWs()
                 checkout scm
@@ -48,9 +45,6 @@ pipeline {
         // *** Push Images In Harbor ***
         // ****************************
         stage("Push_Image"){
-            when {
-                environment name: "GIT_BRANCH", value: "origin/main"
-            }
             steps {
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Push Docker Image *****"
@@ -67,9 +61,6 @@ pipeline {
         // *** Deploy ***
         // **************
         stage("Deployment"){
-            when {
-                environment name: "GIT_BRANCH", value: "origin/main"
-            }
             steps {
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Deploy Application *****"
