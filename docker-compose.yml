@@ -7,8 +7,8 @@ services:
     build: .
     ports:
       - "5002:8000"
-    volumes:
-      - app_data:/app
+    # volumes:
+      # - app_data:/app
     environment:
       - PYTHONUNBUFFERED=1
       - DB_HOST=db
@@ -41,9 +41,9 @@ services:
        io.portainer.accesscontrol.teams: skillab-all
 
 volumes:
-  app_data:
-    labels:
-      io.portainer.accesscontrol.teams: skillab-all
+  # app_data:
+    # labels:
+      # io.portainer.accesscontrol.teams: skillab-all
   mysql_config:
   mysql_data:
     labels:
