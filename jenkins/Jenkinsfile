@@ -5,6 +5,9 @@ pipeline {
              label 'dev-server'
          }
      }
+     options {
+        skipDefaultCheckout true
+     }
      environment {
          APP_NAME = "curriculum-skills"
          MAJOR_RELEASE = 0.1
@@ -12,9 +15,22 @@ pipeline {
          DOCKER_REG = "harbor.skillab-project.eu"
          DOCKER_REPO = "/skillab-all/"
          DOCKER_REG_CREDS = "harbor-creds"
+	    /// Tells Python not to create __pycache__ folders.
+         PYTHONDONTWRITEBYTECODE = '1'
      }
  
      stages {
+         // *************************
+         // *** PREPARATION STAGE ***
+         // *************************
+         stage('Preparation') {
+             steps {
+                 echo "***** Cleaning Workspace and Checking Out Code *****"
+                 cleanWs()
+                 checkout scm
+             }
+         }
+          
          // *************************
          // *** IMAGE BUILD STAGE ***
          // *************************
