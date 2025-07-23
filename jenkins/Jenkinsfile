@@ -29,7 +29,7 @@ pipeline {
                 cleanWs()
                 checkout scm
                 sh 'git pull'
-                sh "echo 'Workspace is now at commit: $(git rev-parse HEAD)'"
+                sh 'echo "Workspace is now at commit: $(git rev-parse HEAD)"'
             }
         }
         
