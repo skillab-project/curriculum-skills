@@ -27,8 +27,14 @@ pipeline {
             steps {
                 echo "***** Cleaning Workspace and Checking Out Code *****"
                 cleanWs()
-                checkout scm
-                sh 'git pull'
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[
+                        credentialsId: 'gh-access_token-userpass',
+                        url: 'https://github.com/skillab-project/curriculum-skills'
+                    ]]
+                ])
                 sh 'echo "Workspace is now at commit: $(git rev-parse HEAD)"'
             }
         }
