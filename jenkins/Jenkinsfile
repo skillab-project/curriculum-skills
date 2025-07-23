@@ -28,6 +28,8 @@ pipeline {
                 echo "***** Cleaning Workspace and Checking Out Code *****"
                 cleanWs()
                 checkout scm
+                sh 'git pull'
+                sh "echo 'Workspace is now at commit: $(git rev-parse HEAD)'"
             }
         }
         
