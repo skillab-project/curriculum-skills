@@ -26,8 +26,8 @@ pipeline {
         stage('Preparation') {
             steps {
                 echo "***** DEBUGGING BRANCH VARIABLES *****"
-                sh 'echo "The value of GIT_BRANCH is: ${env.GIT_BRANCH}"'
-                sh 'echo "The value of BRANCH_NAME is: ${env.BRANCH_NAME}"'
+                sh "echo 'The value of GIT_BRANCH is: ${env.GIT_BRANCH}'"
+                sh "echo 'The value of BRANCH_NAME is: ${env.BRANCH_NAME}'"
                 echo "***** Cleaning Workspace and Checking Out Code *****"
                 cleanWs()
                 checkout scm
