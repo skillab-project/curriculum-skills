@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from typing import List, Dict
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
-        
+from sklearn.decomposition import PCA
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -67,9 +67,10 @@ class CountryTrend(BaseModel):
     country: str
     monthly_counts: List[MonthlyTrend]
 
+
 class ClusterResult(BaseModel):
     cluster: int
-    universities: List[str]
+    universities: List[Dict[str, object]]
     
 class SkillFrequency(BaseModel):
     skill: str
@@ -837,10 +838,12 @@ def get_university_trend_per_location_db():
         cursor.close()
         conn.close()
 
+
+
 @app.get("/cluster/universities/{k}", response_model=List[ClusterResult], tags=["Clustering"], summary="University Clustering by Skills from DB")
 def cluster_universities_db(k: int):
     """
-    Clustering universities based off skill profiles
+    Clustering universities based on skill profiles, also returning 2D coordinates for plotting.
     """
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -868,11 +871,18 @@ def cluster_universities_db(k: int):
 
         vectorizer = CountVectorizer()
         X = vectorizer.fit_transform(documents)
+
         kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
+        pca = PCA(n_components=2)
+        coords_2d = pca.fit_transform(X.toarray())
 
         grouped = defaultdict(list)
         for idx, label in enumerate(kmeans.labels_):
-            grouped[int(label)].append(universities[idx])
+            grouped[int(label)].append({
+                "pref_label": universities[idx],
+                "x": round(float(coords_2d[idx][0]), 3),
+                "y": round(float(coords_2d[idx][1]), 3)
+            })
 
         return [{"cluster": cluster, "universities": unis} for cluster, unis in grouped.items()]
     except mysql.connector.Error as e:
@@ -880,6 +890,7 @@ def cluster_universities_db(k: int):
     finally:
         cursor.close()
         conn.close()
+
 
 
 @app.get("/descriptive/skills_frequency", response_model=List[SkillFrequency], tags=["Descriptive"], summary="Skill frequency across lessons from DB")
