@@ -21,6 +21,7 @@ import mysql.connector
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime
+from math import ceil
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Dict, Set
@@ -1137,7 +1138,10 @@ def labor_export_from_database(
 
 
 @app.get("/bilateral/biodiversity_analysis", tags=["Bilateral"])
-def biodiversity_analysis():
+def biodiversity_analysis(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
@@ -1244,12 +1248,23 @@ def biodiversity_analysis():
                         print(f"[SKIP] {uni} ({country}) - {degree_type} {degree_title} has no Level 4 skills")
 
         print(f"[INFO] Final result contains {len(results)} entries")
-        return {"results": results}
+
+        total = len(results)
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated_results = results[start:end]
+
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": paginated_results
+        }
 
     finally:
         cursor.close()
         conn.close()
-
 
 def update_lesson_info(conn, university_name: str, lesson_name: str, msc_bsc: str, degree_title: str):
     try:
