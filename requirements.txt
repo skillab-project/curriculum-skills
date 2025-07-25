@@ -18,10 +18,11 @@ chardet==5.2.0
 psycopg2-binary==2.9.10 
 PyMuPDF
 pytest
+scikit-learn
 
-# ESCO Skill Extractor
-esco-skill-extractor==0.1.15
+
 
 # for API
 fastapi
 pydantic
+python-dotenv

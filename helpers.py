@@ -5,7 +5,6 @@ import json
 import requests
 import pdfplumber
 from fuzzywuzzy import fuzz
-from esco_skill_extractor import SkillExtractor
 
 CACHE_DIR = 'cache'
 CACHE_FILE = 'pdf_cache.json'
@@ -37,8 +36,6 @@ def load_university_cache():
     except json.JSONDecodeError:
         print("❌ Error: Corrupted university_cache.json file. Resetting cache.")
         return {}
-
-skill_extractor = SkillExtractor()
 
 
 def load_from_cache(university_name):
@@ -100,17 +97,15 @@ def find_possible_university(pdf_file_path):
     match = re.search(pattern, all_text)
 
     if match:
-        return match.group(0).strip()  # Return found university name
+        return match.group(0).strip()
 
-    # If unknown, check if this file has been processed before
     if pdf_file_path in university_cache:
-        return university_cache[pdf_file_path] # Use cached value
+        return university_cache[pdf_file_path]
 
-    # Generate a unique "Unknown University" with an increasing counter
     unknown_count = sum(1 for entry in university_cache.values() if "Unknown University" in entry) + 1
     unknown_name = f"Unknown University {unknown_count}"
     
-    university_cache[pdf_file_path] = {"name": unknown_name}  # Store name & default country
+    university_cache[pdf_file_path] = {"name": unknown_name}
     save_cache(university_cache)
 
     return unknown_name

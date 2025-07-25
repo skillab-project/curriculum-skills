@@ -1,12 +1,11 @@
 import mysql.connector
-from esco_skill_extractor import SkillExtractor
 from skills import extract_and_get_title
 from output import print_colored_text, print_horizontal_line, print_loading_line
 from helpers import load_from_cache, save_to_cache
+import requests
 
 from concurrent.futures import ThreadPoolExecutor
 
-skill_extractor = SkillExtractor()
 
 def is_database_connected(db_config):
     try:
@@ -82,15 +81,26 @@ def write_to_database(all_data, db_config, university_name, country, number_of_s
                     extracted_skill_urls = cached_skills[lesson_name]["skills"]
                     skill_connect = cached_skills[lesson_name].get("skill_connect", {})
                 else:
-                    skills_list = skill_extractor.get_skills([lesson_desc])
+                    try:
+                        response = requests.post(
+                            "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+                            headers={"Content-Type": "application/json"},
+                            json=[lesson_desc],
+                            verify=False
+                        )
+                        skills_list = response.json() if response.ok else []
+                    except Exception as e:
+                        print(f"[ERROR] Skill extraction failed: {e}")
+                        skills_list = []
+                    
                     extracted_skills = []
                     extracted_skill_urls = []
                     skill_connect = {}
+                    
+                    for skill_url in skills_list:
+                        skill_name = extract_and_get_title(skill_url) or "Unknown Skill"
+                        skill_connect[skill_url] = skill_name
 
-                    for skill_set in skills_list:
-                        for skill_url in skill_set:
-                            skill_name = extract_and_get_title(skill_url) or "Unknown Skill"
-                            skill_connect[skill_url] = skill_name  
 
                     extracted_skill_urls = list(skill_connect.keys())
                     extracted_skills = list(skill_connect.values())
@@ -99,7 +109,7 @@ def write_to_database(all_data, db_config, university_name, country, number_of_s
                         "skill_names": extracted_skills,
                         "skills": extracted_skill_urls,
                         "skill_connect": skill_connect,
-                        "description": lesson_desc  # ✅ Store description in cache
+                        "description": lesson_desc
                     }
 
                 for skill_url, skill_name in skill_connect.items():

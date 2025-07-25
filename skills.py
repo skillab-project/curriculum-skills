@@ -1,13 +1,12 @@
 import json
 import requests
-from esco_skill_extractor import SkillExtractor
 import mysql.connector
 from fuzzywuzzy import fuzz, process
 from helpers import load_from_cache, save_to_cache, load_university_cache
 from output import print_colored_text, print_horizontal_line, print_loading_line, print_horizontal_small_line, print_green_line
 import os
+from mysql.connector import Error
 
-skill_extractor = SkillExtractor()
 
 def list_available_cached_universities():
     """
@@ -24,9 +23,21 @@ def save_cache(data):
     cache_file_path = os.path.join(CACHE_DIR, CACHE_FILE)
     with open(cache_file_path, 'w') as cache_file:
         json.dump(data, cache_file, indent=4)
+        
+def extract_skills_from_api(description):
+    try:
+        response = requests.post(
+            "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+            headers={"Content-Type": "application/json"},
+            json=[description],
+            verify=False
+        )
+        return response.json()[0] if response.ok else []
+    except Exception as e:
+        print(f"[ERROR] Skill extraction API failed: {e}")
+        return []
 
 
-from mysql.connector import Error
 
 def get_skills_for_lesson(university_name, all_data, lesson_name=None, skillname=True, db_config=None):
     results = {}
@@ -39,13 +50,12 @@ def get_skills_for_lesson(university_name, all_data, lesson_name=None, skillname
         
         if university_name:
             best_match = process.extractOne(university_name, university_list)
-            if best_match and best_match[1] > 80:  # Confidence threshold
+            if best_match and best_match[1] > 80:
                 university_name = best_match[0]
             else:
                 return {}
         
         if university_name and lesson_name:
-            # Case 1: Specific university and lesson
             query = """
                 SELECT u.university_name, l.lesson_name, s.skill_name FROM Skills s
                 JOIN Lessons l ON s.lesson_id = l.lesson_id
@@ -55,7 +65,6 @@ def get_skills_for_lesson(university_name, all_data, lesson_name=None, skillname
             cursor.execute(query, (university_name, f"%{lesson_name}%"))
         
         elif lesson_name:
-            # Case 2: Any university, specific lesson
             query = """
                 SELECT u.university_name, l.lesson_name, s.skill_name FROM Skills s
                 JOIN Lessons l ON s.lesson_id = l.lesson_id
@@ -65,7 +74,6 @@ def get_skills_for_lesson(university_name, all_data, lesson_name=None, skillname
             cursor.execute(query, (f"%{lesson_name}%",))
         
         elif university_name:
-            # Case 4: Specific university, all lessons
             query = """
                 SELECT u.university_name, l.lesson_name, s.skill_name FROM Skills s
                 JOIN Lessons l ON s.lesson_id = l.lesson_id
@@ -75,7 +83,6 @@ def get_skills_for_lesson(university_name, all_data, lesson_name=None, skillname
             cursor.execute(query, (university_name,))
         
         else:
-            # Case 3: All universities, all lessons
             query = """
                 SELECT u.university_name, l.lesson_name, s.skill_name FROM Skills s
                 JOIN Lessons l ON s.lesson_id = l.lesson_id
@@ -131,7 +138,7 @@ def extract_and_get_title(skill_url):
         return "Error: Exception occurred"
 
 
-def search_courses_by_skill(all_data, search_skill, skill_extractor, db_config, university_name, threshold=52, use_cache=True):
+def search_courses_by_skill(all_data, search_skill, db_config, university_name, threshold=52, use_cache=True):
     from database import is_database_connected 
     if not search_skill:
         print_colored_text("No skill provided for search.", 31)
@@ -169,10 +176,10 @@ def search_courses_by_skill(all_data, search_skill, skill_extractor, db_config, 
             print_colored_text(f"Database error: {e}", 31)
             return []
 
-    else:  # Database not connected
+    else:
         print_colored_text("Database not connected. Using cache instead.", 33)
         print_horizontal_line(50)
-        cache = load_from_cache(university_name)  # Assuming load_from_cache is defined
+        cache = load_from_cache(university_name)
         if cache is None:
             cache = {}
 
@@ -180,10 +187,10 @@ def search_courses_by_skill(all_data, search_skill, skill_extractor, db_config, 
             for lesson_name, lesson_data in lessons.items():
                 lesson_cache = cache.get(semester, {}).get(lesson_name, {})
                 lesson_skills = lesson_cache.get("skill_names", {})
-                lesson_urls = lesson_cache.get("skills", {}) # Get the URLs from the cache
+                lesson_urls = lesson_cache.get("skills", {})
                 lesson_description = lesson_data.get("description", "")
 
-                if (not lesson_skills or not lesson_urls) and use_cache and lesson_description != "This lesson has no data!":  # Check for BOTH
+                if (not lesson_skills or not lesson_urls) and use_cache and lesson_description != "This lesson has no data!":
                     print_colored_text(f"Cache incomplete for '{lesson_name}'! Creating/updating now.", 32)
                     print(f"Extracting skills for lesson '{lesson_name}'...")
 
@@ -192,37 +199,37 @@ def search_courses_by_skill(all_data, search_skill, skill_extractor, db_config, 
                         lesson_description = lesson_description.get("text", "")
 
                     if isinstance(lesson_description, str):
-                        skills_list = skill_extractor.get_skills([lesson_description])
-                        new_lesson_skills = []  # List to maintain order
-                        new_lesson_urls = []  # Set for skill URLs
+                        skills_list = [extract_skills_from_api(lesson_description)]
+                        new_lesson_skills = []
+                        new_lesson_urls = []
 
 
                         for skill_set in skills_list:
                             for skill_url in skill_set:
                                 if skill_url not in new_lesson_urls:
-                                    new_lesson_urls.append(skill_url)  # Append to maintain order
+                                    new_lesson_urls.append(skill_url)
                                     skill_name = extract_and_get_title(skill_url)
                                     if skill_name:
-                                        new_lesson_skills.append(skill_name)  # Append to maintain order
+                                        new_lesson_skills.append(skill_name)
 
 
                         if semester not in cache:
                             cache[semester] = {}
                         if lesson_name not in cache[semester]:
                             cache[semester][lesson_name] = {}
-                        cache[semester][lesson_name]["skill_names"] = new_lesson_skills  # Update skill names
-                        cache[semester][lesson_name]["skills"] = new_lesson_urls # Update skill URLs
+                        cache[semester][lesson_name]["skill_names"] = new_lesson_skills
+                        cache[semester][lesson_name]["skills"] = new_lesson_urls
                         save_to_cache(university_name, cache)
                     else:
                         print(f"Warning: Description for {lesson_name} is not a string. Skipping skill extraction.")
 
-                if isinstance(lesson_skills, dict): # Check if it is a dictionary
+                if isinstance(lesson_skills, dict):
                     for skill_url, skill_name in lesson_skills.items():
                         similarity_score = fuzz.ratio(search_skill.lower(), skill_name.lower())
                         if similarity_score >= threshold:
                             found_courses.append((semester, lesson_name, skill_name, similarity_score))
 
-                elif isinstance(lesson_skills, list): #Handle skill_names stored as lists
+                elif isinstance(lesson_skills, list):
                     for skill_name in lesson_skills:
                         similarity_score = fuzz.ratio(search_skill.lower(), skill_name.lower())
                         if similarity_score >= threshold:
@@ -316,7 +323,6 @@ def search_courses_by_skill_database(search_skill, db_config, university_name=No
         best_match = max(matched_universities, key=matched_universities.get)
         results = [row for row in results if row["university_name"] == best_match]
 
-    # ✅ If no university_name, return ALL lessons that match the skill
     for row in results:
         university = row["university_name"]
         semester = row["semester"]

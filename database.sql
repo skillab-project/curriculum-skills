@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS Lessons (
     lesson_name VARCHAR(255) NOT NULL,
     semester VARCHAR(255) NOT NULL,
     description TEXT,
+    msc_bsc VARCHAR(10),
+    degree VARCHAR(255),
     university_id INT,
     FOREIGN KEY (university_id) REFERENCES University(university_id) ON DELETE CASCADE
 );

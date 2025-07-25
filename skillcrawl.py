@@ -2,7 +2,6 @@ import pdfplumber
 import requests
 import re
 import sys
-from esco_skill_extractor import SkillExtractor
 from bs4 import BeautifulSoup
 import time
 from urllib.parse import quote_plus
@@ -28,11 +27,6 @@ university_country = None
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-import requests
-
-
-skill_extractor = SkillExtractor()
-
 UNI_FILE = "university_cache.json"
 UNIVERSITY_API = "http://universities.hipolabs.com/search?name="
 
@@ -42,43 +36,35 @@ if os.path.exists(UNI_FILE):
 else:
     university_cache = {}
 
-import requests
-import json
 def get_university_country(university_name):
-    # ✅ Ensure university_name is a string
     if not isinstance(university_name, str):
-        print(f"⚠️ Invalid university_name type: {type(university_name)}. Expected str, got {university_name}")
+        print(f"Invalid university_name type: {type(university_name)}. Expected str, got {university_name}")
         return "Unknown"
 
-    # ✅ Ensure university_cache is a dictionary
+
     if not isinstance(university_cache, dict):
-        print("⚠️ university_cache is not a dictionary!")
+        print("university_cache is not a dictionary!")
         return "Unknown"
 
-    # ✅ Check if university exists in cache and has a country field
     if university_name in university_cache and isinstance(university_cache[university_name], dict) and "country" in university_cache[university_name]:
         return university_cache[university_name]["country"]
 
     try:
-        response = requests.get(UNIVERSITY_API + university_name, timeout=5)  # Set a timeout
-        response.raise_for_status()  # Ensure the request was successful
+        response = requests.get(UNIVERSITY_API + university_name, timeout=5)
+        response.raise_for_status() 
 
-        # 🔥 Debugging: Print first 500 chars of response
-        print(f"🔍 API Response: {response.text[:500]}")  
+        print(f"API Response: {response.text[:500]}")  
 
-        # ✅ Ensure the response is valid JSON
         if not response.text.strip().startswith("{") and not response.text.strip().startswith("["):
-            print("⚠️ Invalid JSON format received from API")
+            print("Invalid JSON format received from API")
             return "Unknown"
 
-        # ✅ Attempt to parse JSON safely
         try:
             data = response.json()
         except json.JSONDecodeError:
-            print("❌ Failed to parse JSON response")
+            print("Failed to parse JSON response")
             return "Unknown"
 
-        # ✅ Check if response contains valid data
         if data and isinstance(data, list) and len(data) > 0:
             country = data[0].get("country", "Unknown")
             university_cache[university_name] = {"name": university_name, "country": country}
@@ -86,7 +72,7 @@ def get_university_country(university_name):
             return country
 
     except requests.exceptions.RequestException as e:
-        print(f"❌ API Request failed: {e}")
+        print(f"API Request failed: {e}")
 
     return "Unknown"
 
@@ -97,15 +83,14 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
     if not pdf_file_path:
         return
 
-    # Get the PDF's directory path
     pdf_directory = os.path.dirname(pdf_file_path)
 
     # Use both university name and directory as a unique key
     if pdf_file_path in university_cache:
         university_data = university_cache[pdf_file_path]
-        if isinstance(university_data, str):  # Convert to dictionary if it's a string
+        if isinstance(university_data, str):
             university_data = {"name": university_data, "country": "Unknown"}
-            university_cache[pdf_file_path] = university_data  # Update the cache
+            university_cache[pdf_file_path] = university_data
 
         university_name = university_data["name"]
         university_country = university_data.get("country", "Unknown")
@@ -113,8 +98,7 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
         print(f"[INITIALIZATION] Searching for University Name inside the provided PDF...")
         university_name = find_possible_university(pdf_file_path)
         university_country = get_university_country(university_name)
-
-        # Store both name and country, keyed by directory
+        
         cache_key = f"{university_name} | {pdf_directory}"
         university_cache[cache_key] = {"name": university_name, "country": university_country}
         save_cache()
@@ -143,7 +127,17 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
 
         for semester, lessons in all_data.items():
             for lesson, description in lessons.items():
-                skills_list = skill_extractor.get_skills([description])
+                try:
+                    response = requests.post(
+                        "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+                        headers={"Content-Type": "application/json"},
+                        json=[description],
+                        verify=False
+                    )
+                    skills_list = response.json() if response.ok else []
+                except Exception as e:
+                    print(f"[ERROR] Skill extraction failed for lesson: {description[:30]}")
+                    skills_list = []
                 filtered_skills = set()
                 for skill_set in skills_list:
                     for skill_url in skill_set:
@@ -177,7 +171,7 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
         elif skillname:
             get_skills_for_lesson(university_name, all_data, lesson_name, skills=False, skillname=True)
         elif skillsearch:
-            search_courses_by_skill(all_data, lesson_name, skill_extractor, db_config, university_name)
+            search_courses_by_skill(all_data, lesson_name, db_config, university_name)
         else:
             print(f"Invalid command format. Use 'skills' or 'skillname' followed by lesson name, or 'skillsearch' followed by skill.")
     else:
@@ -222,7 +216,18 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
                         lesson_description = lesson_description.get("text", "")
 
                     if isinstance(lesson_description, str):
-                        skills_list = skill_extractor.get_skills([lesson_description])
+                        try:
+                            response = requests.post(
+                                "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+                                headers={"Content-Type": "application/json"},
+                                json=[lesson_description],
+                                verify=False
+                            )
+                            skills_list = response.json() if response.ok else []
+                        except Exception as e:
+                            print(f"[ERROR] Skill extraction failed for lesson: {description[:30]}")
+                            skills_list = []
+
                         filtered_skills = set()
                         filtered_skill_names = set()
 
@@ -262,10 +267,9 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
                 for lesson_name, lesson_data in lessons.items():
                     print(f'   {lesson_name}')
 
-                    # Retrieve cached skill data
                     lesson_cache = cached_data.get(semester, {}).get(lesson_name, {})
                     cached_skill_names = set(lesson_cache.get("skill_names", []))
-                    cached_skills = set(lesson_cache.get("skills", []))  # Skill URLs
+                    cached_skills = set(lesson_cache.get("skills", []))
 
                     lesson_description = lesson_data.get("description", "")
 
@@ -273,7 +277,18 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
                         lesson_description = lesson_description.get("text", "")
 
                     if isinstance(lesson_description, str):
-                        skills_list = skill_extractor.get_skills([lesson_description])
+                        try:
+                          response = requests.post(
+                              "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+                              headers={"Content-Type": "application/json"},
+                              json=[lesson_description],
+                              verify=False
+                          )
+                          skills_list = response.json() if response.ok else []
+                        except Exception as e:
+                          print(f"[ERROR] Skill extraction failed for lesson: {description[:30]}")
+                          skills_list = []
+                      
                         filtered_skills = set()
                         filtered_skill_names = set()
                         print_green_line(35)
@@ -282,13 +297,10 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
                             for skill_url in skill_set:
                                 filtered_skills.add(skill_url)
 
-                        # Extract skill name and save immediately if not in cache
                                 skill_name = extract_and_get_title(skill_url)
                                 if skill_name and skill_name not in cached_skill_names:
                                     
                                     cached_skill_names.add(skill_name)
-
-                            # 🔹 Save to cache **immediately**
                                     if semester not in cached_data:
                                         cached_data[semester] = {}
                                     if lesson_name not in cached_data[semester]:
@@ -300,13 +312,12 @@ def main(pdf_file_path: str, simplified: bool, skills: bool, show_descr: bool, s
                                     print_colored_text(f'    [NEW Skill Added]: {skill_name}', "32")
                         print_green_line(35)        
 
-                        # Merge new skill URLs with cached ones and save immediately if needed
                         updated_skills = cached_skills | filtered_skills
                         if updated_skills != cached_skills:
                             cached_data[semester][lesson_name]["skills"] = list(updated_skills)
                             save_to_cache(university_name, cached_data)
 
-                        # Print extracted skill names
+
                         if cached_skill_names:
                             print_colored_text(f'    Skill Names:', "32")
                             print_green_line(50)

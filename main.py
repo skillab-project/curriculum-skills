@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from pydantic import BaseModel
 from database import write_to_database, is_database_connected
 from skills import get_skills_for_lesson, search_courses_by_skill, search_courses_by_skill_database, extract_and_get_title, search_courses_by_skill_url
@@ -10,13 +10,12 @@ import json
 from helpers import find_possible_university, load_from_cache, save_to_cache, load_university_cache, save_cache
 from skillcrawl import get_university_country
 from typing import List
-from fuzzywuzzy import process
+from fuzzywuzzy import process, fuzz
 from fastapi import UploadFile
-from esco_skill_extractor import SkillExtractor
 from typing import Dict, Optional
 import re
 from crawler import UniversityCrawler
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import psycopg2
 import mysql.connector
 from concurrent.futures import ThreadPoolExecutor
@@ -24,19 +23,21 @@ import requests
 from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Set
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from fastapi import APIRouter
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from urllib.parse import quote_plus
 
+from dotenv import load_dotenv
+load_dotenv()
 
-
-
-skill_extractor = SkillExtractor()
 
 UNI_FILE = "university_cache.json"
+os.makedirs("cache/occupations", exist_ok=True)
 
 if os.path.exists(UNI_FILE):
     with open(UNI_FILE, "r") as f:
@@ -45,6 +46,23 @@ else:
     university_cache = {}
 
 app = FastAPI(title="SkillCrawl API", description="API for skill extraction and course search.")
+
+
+class Organization(BaseModel):
+    name: str
+    location: str
+
+class ExportItem(BaseModel):
+    id: List[int]
+    title: List[str]
+    description: List[str]
+    skills: List[List[str]]
+    occupations: List[List[str]]
+    upload_date: List[str]
+    organization: Organization
+
+class ExportResponse(BaseModel):
+    items: List[ExportItem]
 
 
 class CountryUniversities(BaseModel):
@@ -105,11 +123,41 @@ class TopSkillsRequest(BaseModel):
     university_name: str
     top_n: Optional[int] = 20
 
-@app.get("/health")
+
+def get_tracker_token() -> str:
+    login_url = "https://skillab-tracker.csd.auth.gr/api/login"
+    payload = {
+        "username": os.getenv("TRACKER_USERNAME"),
+        "password": os.getenv("TRACKER_PASSWORD")
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "accept": "application/json"
+    }
+
+    try:
+        response = requests.post(login_url, json=payload, headers=headers, verify=False)
+        response.raise_for_status()
+
+        token = response.text.strip().strip('"')
+        if not token:
+            print(f"[ERROR] Empty token returned from login")
+        else:
+            print(f"[INFO] Successfully obtained token: {token[:15]}...")
+
+        return token
+
+    except Exception as e:
+        print(f"[ERROR] Login failed: {e}")
+        return ""
+
+
+
+@app.get("/health", tags=["Meta"])
 def health_check():
     return {"status": "running"}
 
-@app.get("/list_pdfs")
+@app.get("/list_pdfs", tags=["PDF"])
 def list_pdfs():
 
     university_cache = load_university_cache()
@@ -148,7 +196,7 @@ def list_pdfs():
     
     return {"pdf_files": pdf_files}
 
-@app.post("/process_pdf")
+@app.post("/process_pdf", tags=["PDF"])
 def process_pdf(request: PDFProcessingRequest):
 
     university_cache = load_university_cache()
@@ -192,13 +240,23 @@ def process_pdf(request: PDFProcessingRequest):
         for i, semester_text in enumerate(semesters, 1):
             lessons = process_pages_by_lesson([page for page in pages if page in semester_text])
             all_data[f"Semester {i} ({len(lessons)} lessons)"] = {
-                lesson: {"description": desc, "skills": list({s for skill_set in skill_extractor.get_skills([desc]) for s in skill_set})}
+                lesson: {"description": desc, "skills": list({s for skill_set in [s.get("id") for s in requests.post(
+              "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+              headers={"accept": "application/json", "Content-Type": "application/json"},
+              json={"description": [desc]},
+              verify=False
+          ).json().get("items", [])] for s in skill_set})}
                 for lesson, desc in lessons.items()
             }
     else:
         lessons = process_pages_by_lesson(pages)
         all_data["Lessons Only"] = {
-            lesson: {"description": desc, "skills": list({s for skill_set in skill_extractor.get_skills([desc]) for s in skill_set})}
+            esson: {"description": desc, "skills": list({s for skill_set in [s.get("id") for s in requests.post(
+          "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+          headers={"accept": "application/json", "Content-Type": "application/json"},
+          json={"description": [desc]},
+          verify=False
+      ).json().get("items", [])] for s in skill_set})}
             for lesson, desc in lessons.items()
         }
 
@@ -234,7 +292,7 @@ def load_all_cached_data():
     
     return all_data 
 
-@app.post("/filter_skillnames")
+@app.post("/filter_skillnames", tags=["Skills"])
 def get_skills(request: LessonRequest):
     """
     API endpoint to get skill names based on university and lesson name.
@@ -256,8 +314,9 @@ def get_skills(request: LessonRequest):
 
 
 
-@app.post("/calculate_skillnames")
+@app.post("/calculate_skillnames", tags=["Skills"])
 def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None):
+    token = get_tracker_token()
     all_cached_data = load_all_cached_data()
     university_names = [name.replace("_cache", "").strip() for name in all_cached_data.keys()]
 
@@ -277,7 +336,6 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
 
     university_name = university_key.replace("_cache", "").strip()
 
-    # Skillab Tracker API endpoint
     skillab_tracker_url = "https://skillab-tracker.csd.auth.gr/api/track_skills"
 
 
@@ -297,8 +355,13 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
                 print(f"[WARNING] No valid description for {lesson}. Skipping skill extraction.")
                 return lesson, cached_skill_names
 
-            # 🔵 Extract skills using skill extractor
-            skills_list = skill_extractor.get_skills([lesson_description])
+            skills_list = requests.post(
+              "https://portal.skillab-project.eu/esco-skill-extractor/extract-skills",
+              headers={"Content-Type": "application/json"},
+              json=[lesson_description],
+              verify=False
+          ).json()
+
             skill_urls = set()
 
             for skill_set in skills_list:
@@ -309,14 +372,13 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
                 print(f"[WARNING] No skills found for {lesson}. Skipping API call.")
                 return lesson, cached_skill_names
 
-            # 🔵 Convert skill URLs into URL-encoded format for API call
             skill_params = "&".join([f"ids={requests.utils.quote(skill_url)}" for skill_url in skill_urls])
 
-            # 🔵 Make the POST request in the required format
             skillab_tracker_url = "https://skillab-tracker.csd.auth.gr/api/skills?page=1"
             headers = {
                 "accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Bearer {token}"
             }
             response = requests.post(skillab_tracker_url, headers=headers, data=skill_params, verify=False)
 
@@ -324,7 +386,6 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
                 print(f"[ERROR] Skillab API failed for {lesson}. Response: {response.status_code} - {response.text}")
                 return lesson, cached_skill_names
 
-            # 🔵 Extract skill names from API response
             skill_data = response.json()
             new_skills = OrderedDict()
 
@@ -371,7 +432,7 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
 
                 selected_lessons = {best_lesson_match: lessons[best_lesson_match]}
             else:
-                selected_lessons = lessons  # Preserve all lessons if no specific one is given
+                selected_lessons = lessons 
 
             for lesson, lesson_data in selected_lessons.items():
                 lesson_tasks.append(executor.submit(process_lesson, semester, lesson, lesson_data))
@@ -386,7 +447,7 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
 
 
 
-@app.post("/search_skill")
+@app.post("/search_skill", tags=["Queries"])
 def search_skill(request: SkillSearchRequest):
     """
     You can search if a skill exists in the database.
@@ -402,7 +463,7 @@ def search_skill(request: SkillSearchRequest):
     return {"results": results}
 
 
-@app.post("/search_skill_by_URL")
+@app.post("/search_skill_by_URL", tags=["Queries"])
 def search_skill_url(request: SkillSearchURLRequest):
     """
     You can search if a skill exists in the database.
@@ -418,7 +479,7 @@ def search_skill_url(request: SkillSearchURLRequest):
     return {"results": results}
 
 
-@app.post("/get_universities_by_skills")
+@app.post("/get_universities_by_skills", tags=["Queries"])
 def get_universities_by_skills(request: SkillListRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -458,7 +519,6 @@ def get_universities_by_skills(request: SkillListRequest):
                 university_courses[uni][lesson] = []
             university_courses[uni][lesson].append(skill)
         
-        # Filter universities that have all required skills
         filtered_universities = {
             uni: courses for uni, courses in university_courses.items()
             if len(university_skill_counts[uni]) == len(request.skills)
@@ -473,7 +533,7 @@ def get_universities_by_skills(request: SkillListRequest):
     
     return filtered_universities
 
-@app.post("/get_top_skills")
+@app.post("/get_top_skills", tags=["Queries"])
 def get_top_skills(request: TopSkillsRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -509,7 +569,7 @@ def get_top_skills(request: TopSkillsRequest):
     return {"university_name": request.university_name, "top_skills": top_skills}
 
 
-@app.post("/get_top_skills_all")
+@app.post("/get_top_skills_all", tags=["Queries"])
 def get_top_skills_all(request: TopSkillsAllRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -546,7 +606,7 @@ def get_top_skills_all(request: TopSkillsAllRequest):
     return {"top_skills": top_skills}
 
 
-@app.get("/search_json_in_cache")
+@app.get("/search_json_in_cache", tags=["Cache"])
 def search_json_in_cache(university_name: str):
     """
     Searches for a cached JSON file based on a fuzzy match of the university name.
@@ -577,7 +637,7 @@ def search_json_in_cache(university_name: str):
     }
 
 
-@app.post("/save_to_db")
+@app.post("/save_to_db", tags=["Database"])
 def save_to_db(university_name: str):
     """
     Searches for a cached JSON file using fuzzy matching and saves its data to the database.
@@ -630,13 +690,13 @@ def save_to_db(university_name: str):
 
 CACHE_FOLDER = "cache"
 
-@app.get("/all_university_data")
+@app.get("/all_university_data", tags=["Database"])
 def get_all_data(university_name: str):
     """
     Fetch all university-related data, including lessons and skills, from the MySQL database.
     If the database is offline, raise an error immediately.
     """
-    if not is_database_connected(DB_CONFIG):  # Check connection before proceeding
+    if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
     query = """
@@ -703,7 +763,7 @@ def get_all_data(university_name: str):
 
 
 
-@app.post("/save_all_to_db")
+@app.post("/save_all_to_db", tags=["Database"])
 def save_all_to_db():
     """
     Dynamically finds JSON files in the cache folder and saves their contents to the database.
@@ -925,9 +985,286 @@ def get_skill_frequencies():
         cursor.close()
         conn.close()
 
+@app.get("/bilateral/labor_market_export", response_model=ExportResponse, tags=["Bilateral"])
+def labor_export_from_database(
+    university_name: str = Query(None, description="Optional university name to search for"),
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(100, ge=1, le=1000, description="Number of items per page")
+):
+    try:
+        occupation_cache = load_from_cache("occupations/occupations") or {}
+        new_entries_added = False
+
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+
+        query_filter = ""
+        params = ()
+
+        if university_name:
+            cursor.execute("SELECT DISTINCT university_name FROM University")
+            all_unis = [row["university_name"] for row in cursor.fetchall()]
+
+            match = process.extractOne(university_name, all_unis, scorer=fuzz.token_sort_ratio)
+            if not match or match[1] < 70:
+                return JSONResponse(status_code=404, content={"error": "University not found with sufficient confidence"})
+            matched_name = match[0]
+            query_filter = "WHERE u.university_name = %s"
+            params = (matched_name,)
+
+        query = f"""
+            SELECT 
+                u.university_name,
+                u.country,
+                u.created_at,
+                l.lesson_id,
+                l.lesson_name,
+                l.description,
+                s.skill_url,
+                s.skill_name
+            FROM University u
+            JOIN Lessons l ON u.university_id = l.university_id
+            LEFT JOIN Skills s ON l.lesson_id = s.lesson_id
+            {query_filter}
+            ORDER BY u.university_id, l.lesson_id
+        """
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        lessons_data = defaultdict(lambda: {
+            "university": None,
+            "country": None,
+            "upload_date": None,
+            "description": "",
+            "skills": []
+        })
+
+        for row in rows:
+            key = row["lesson_id"]
+            lessons_data[key]["title"] = row["lesson_name"]
+            lessons_data[key]["description"] = row.get("description", "") or ""
+            lessons_data[key]["university"] = row["university_name"]
+            lessons_data[key]["country"] = row["country"]
+            lessons_data[key]["upload_date"] = row["created_at"].strftime("%Y-%m-%d") if row.get("created_at") else datetime.today().strftime("%Y-%m-%d")
+            if row["skill_url"]:
+                lessons_data[key]["skills"].append((row["skill_url"], row.get("skill_name", "")))
+
+        export_items = []
+
+        for lesson_id, lesson in lessons_data.items():
+            skill_names = [name for _, name in lesson["skills"] if name]
+            occupations = []
+            seen_occupations = set()
+            token = get_tracker_token()
+
+            for skill_name in skill_names:
+                if skill_name in occupation_cache:
+                    occupation_list = occupation_cache[skill_name]
+                else:
+                    payload = [("keywords", skill_name)] + [
+                        ("keywords_logic", "or"),
+                        ("children_logic", "or"),
+                        ("ancestors_logic", "or")
+                    ]
+                    headers = {
+                        "accept": "application/json",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Authorization": f"Bearer {token}"
+                    }
+
+                    try:
+                        response = requests.post(
+                            "https://skillab-tracker.csd.auth.gr/api/occupations?page=1",
+                            headers=headers,
+                            data=payload,
+                            verify=False
+                        )
+                        occupation_list = []
+                        if response.ok:
+                            for item in response.json().get("items", []):
+                                occ_id = item.get("id")
+                                occ_label = item.get("label")
+                                if occ_id and occ_id not in seen_occupations:
+                                    seen_occupations.add(occ_id)
+                                    occupation_list.append([occ_id, occ_label])
+                        else:
+                            print(f"[WARNING] Occupation API failed: {response.status_code} - {response.text}")
+                        occupation_cache[skill_name] = occupation_list
+                        new_entries_added = True
+                    except Exception as e:
+                        print(f"[ERROR] Skill extraction failed for lesson: {description[:30]}")
+                        occupation_cache[skill_name] = []
+                        occupation_list = []
+
+                occupations += [o for o in occupation_cache.get(skill_name, []) if o[0] not in seen_occupations]
+                seen_occupations.update([o[0] for o in occupation_cache.get(skill_name, [])])
+
+            export_items.append({
+                "id": [lesson_id],
+                "title": [lesson["title"]],
+                "description": [lesson["description"]],
+                "skills": [[url, name] for url, name in lesson["skills"]],
+                "occupations": occupations,
+                "upload_date": [lesson["upload_date"]],
+                "organization": {
+                    "name": lesson["university"],
+                    "location": lesson["country"]
+                }
+            })
+
+        if new_entries_added:
+            os.makedirs("cache/occupations", exist_ok=True)
+            print("[INFO] Saving updated occupation cache to cache/occupations/occupations_cache.json")
+            save_to_cache("occupations/occupations", occupation_cache)
+
+        offset = (page - 1) * limit
+        paginated_items = export_items[offset:offset + limit]
+
+        return ExportResponse(items=paginated_items)
+
+    except mysql.connector.Error as e:
+        return JSONResponse(status_code=500, content={"error": f"Database error: {str(e)}"})
+
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
 
 
-@app.post("/crawl", summary="Start a web crawl")
+@app.get("/bilateral/biodiversity_analysis", tags=["Bilateral"])
+def biodiversity_analysis():
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+    SELECT 
+        u.university_name, u.country,
+        l.lesson_id, l.lesson_name, l.semester, l.description,
+        s.skill_url, s.skill_name
+    FROM University u
+    JOIN Lessons l ON u.university_id = l.university_id
+    LEFT JOIN Skills s ON l.lesson_id = s.lesson_id
+    """
+
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        print(f"[INFO] Retrieved {len(rows)} rows from database")
+
+        university_map = defaultdict(lambda: defaultdict(lambda: {
+            "BSc": set(), "MSc": set()
+        }))
+        skill_url_map = {}
+
+        for row in rows:
+            uni = row["university_name"]
+            country = row["country"]
+            skill_url = row["skill_url"]
+            skill_name = row["skill_name"]
+            lesson = row["lesson_name"] or ""
+            description = row["description"] or ""
+
+            degree_type = "MSc" if re.search(r"master|msc", lesson, re.IGNORECASE) else "BSc"
+            degree_title = "Computer Science"
+
+            if skill_url:
+                university_map[(country, uni)][degree_title][degree_type].add((skill_url, skill_name))
+                skill_url_map[skill_url] = skill_name
+
+        print(f"[INFO] Collected {len(skill_url_map)} unique skills across all courses")
+
+        def get_level4_skill_ids(skill_ids: List[str]) -> Set[str]:
+            token = get_tracker_token()
+            headers = {
+                "accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Bearer {token}"
+            }
+            data = [("ids", sid) for sid in skill_ids]
+            data.append(("min_skill_level", "4"))
+            data.append(("max_skill_level", "4"))
+
+            try:
+                response = requests.post(
+                    "https://skillab-tracker.csd.auth.gr/api/skills",
+                    headers=headers,
+                    data=data,
+                    verify=False
+                )
+                response.raise_for_status()
+                items = response.json().get("items", [])
+
+                print(f"[DEBUG] API returned {len(items)} Level 4 skills from {len(skill_ids)} submitted")
+                return {item["id"] for item in items}
+            except Exception as e:
+                print(f"[ERROR] Failed to fetch skill levels: {e}")
+                print(f"[DEBUG] Failed batch: {skill_ids}")
+                return set()
+
+        level4_skill_ids = set()
+        all_skill_urls = list(skill_url_map.keys())
+
+        for i in range(0, len(all_skill_urls), 50):
+            batch = all_skill_urls[i:i + 50]
+            level4_skill_ids.update(get_level4_skill_ids(batch))
+
+        print(f"[INFO] Found {len(level4_skill_ids)} Level 4 skills")
+
+        results = []
+
+        for (country, uni), degrees in university_map.items():
+            for degree_title, degree_levels in degrees.items():
+                for degree_type, skill_pairs in degree_levels.items():
+                    level4_skills = [
+                        skill_url_map[url]
+                        for (url, _) in skill_pairs
+                        if url in level4_skill_ids
+                    ]
+                    if level4_skills:
+                        print(f"[DEBUG] Including {degree_type} {degree_title} at {uni} ({country}) with {len(level4_skills)} Level 4 skills")
+                        results.append({
+                            "country": country,
+                            "university": uni,
+                            "department": "Computer Science",
+                            "degree": {
+                                "type": degree_type,
+                                "title": degree_title
+                            },
+                            "skills": sorted(set(level4_skills))
+                        })
+                    else:
+                        print(f"[SKIP] {uni} ({country}) - {degree_type} {degree_title} has no Level 4 skills")
+
+        print(f"[INFO] Final result contains {len(results)} entries")
+        return {"results": results}
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_lesson_info(conn, university_name: str, lesson_name: str, msc_bsc: str, degree_title: str):
+    try:
+        cursor = conn.cursor()
+        query = """
+        UPDATE Lessons l
+        JOIN University u ON l.university_id = u.university_id
+        SET l.msc_bsc = %s, l.degree_title = %s
+        WHERE u.university_name = %s AND l.lesson_name = %s
+        """
+        cursor.execute(query, (msc_bsc, degree_title, university_name, lesson_name))
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        print(f"[ERROR] DB update failed for {lesson_name}: {e}")
+
+
+
+@app.post("/crawl", tags=["Crawler"], summary="Start a web crawl")
 def crawl_university(request: CrawlRequest):
     """
     [Warning] A very primitive version of the crawler, for accessing university sites and extracting lesson data automatically.
