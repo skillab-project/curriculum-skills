@@ -52,7 +52,6 @@ app = FastAPI(
 )
 
 
-
 class Organization(BaseModel):
     name: str
     location: str
@@ -452,7 +451,7 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
 
 
 
-@app.post("/search_skill", tags=["Queries"])
+@app.get("/search_skill", tags=["Queries"])
 def search_skill(request: SkillSearchRequest):
     """
     You can search if a skill exists in the database.
@@ -468,7 +467,7 @@ def search_skill(request: SkillSearchRequest):
     return {"results": results}
 
 
-@app.post("/search_skill_by_URL", tags=["Queries"])
+@app.get("/search_skill_by_URL", tags=["Queries"])
 def search_skill_url(request: SkillSearchURLRequest):
     """
     You can search if a skill exists in the database.
@@ -484,7 +483,7 @@ def search_skill_url(request: SkillSearchURLRequest):
     return {"results": results}
 
 
-@app.post("/get_universities_by_skills", tags=["Queries"])
+@app.get("/get_universities_by_skills", tags=["Queries"])
 def get_universities_by_skills(request: SkillListRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -538,7 +537,7 @@ def get_universities_by_skills(request: SkillListRequest):
     
     return filtered_universities
 
-@app.post("/get_top_skills", tags=["Queries"])
+@app.get("/get_top_skills", tags=["Queries"])
 def get_top_skills(request: TopSkillsRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -574,7 +573,7 @@ def get_top_skills(request: TopSkillsRequest):
     return {"university_name": request.university_name, "top_skills": top_skills}
 
 
-@app.post("/get_top_skills_all", tags=["Queries"])
+@app.get("/get_top_skills_all", tags=["Queries"])
 def get_top_skills_all(request: TopSkillsAllRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
