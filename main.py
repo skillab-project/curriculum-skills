@@ -45,7 +45,12 @@ if os.path.exists(UNI_FILE):
 else:
     university_cache = {}
 
-app = FastAPI(title="SkillCrawl API", description="API for skill extraction and course search.")
+app = FastAPI(
+    title="SkillCrawl API",
+    description="API for skill extraction and course search.",
+    root_path="/curriculum-skills"
+)
+
 
 
 class Organization(BaseModel):
