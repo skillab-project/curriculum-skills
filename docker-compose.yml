@@ -16,7 +16,7 @@ services:
       - DB_HOST=db
       - DB_USER=${MYSQL_USER}
       - DB_PASSWORD=${MYSQL_PASSWORD}
-      - DB_NAME=${MYSQL_DATABASE} # This should be set to SkillCrawl in your .env file
+      - DB_NAME=${MYSQL_DATABASE}
     depends_on:
       - db
     labels:
