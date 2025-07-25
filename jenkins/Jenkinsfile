@@ -45,7 +45,14 @@ pipeline {
         stage("Build_Docker_Images"){
             steps {
                 echo "***** Building Docker Image *****"
-                sh 'DOCKER_TAG=test docker compose build --no-cache'
+                withCredentials([usernamePassword(credentialsId: 'tracker-api-creds', usernameVariable: 'TRACKER_USER', passwordVariable: 'TRACKER_PASS')]) {
+                    sh '''
+                        echo "" >> .env
+                        echo "TRACKER_USERNAME=${TRACKER_USER}" >> .env
+                        echo "TRACKER_PASSWORD=${TRACKER_PASS}" >> .env
+                        DOCKER_TAG=test docker compose build --no-cache
+                    '''
+                }
             }
         }
 
@@ -54,13 +61,22 @@ pipeline {
         // ****************************
         stage("Push_Image"){
             steps {
+                withCredentials([
+                    [$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD'],
+                    [$class: 'UsernamePasswordMultiBinding', credentialsId: 'tracker-api-creds', usernameVariable: 'TRACKER_USER', passwordVariable: 'TRACKER_PASS']
+                ]){
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Push Docker Image *****"
-                    sh 'docker compose build --no-cache'
-                    sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
-                    sh 'docker image push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
-                    sh 'DOCKER_TAG="latest" docker compose build'
-                    sh 'docker image push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
+                    sh '''
+                        echo "" >> .env
+                        echo "TRACKER_USERNAME=${TRACKER_USER}" >> .env
+                        echo "TRACKER_PASSWORD=${TRACKER_PASS}" >> .env
+                        docker compose build
+                        docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}
+                        docker image push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
+                        DOCKER_TAG="latest" docker compose build
+                        docker image push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest
+                    '''
                 }
             }
         }

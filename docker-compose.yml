@@ -8,7 +8,7 @@ services:
     ports:
       - "5002:8000"
     volumes:
-      - .:/app
+      - app_data_cache:/app/cache
     env_file:
       - .env
     environment:
@@ -43,7 +43,7 @@ services:
        io.portainer.accesscontrol.teams: skillab-all
 
 volumes:
-  app_data:
+  app_data_cache:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
   mysql_config:
