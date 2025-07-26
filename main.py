@@ -1142,6 +1142,21 @@ def biodiversity_analysis(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
 ):
+
+    cached_data = load_from_cache("biodiversity/bio")
+    if cached_data:
+        total = len(cached_data)
+        start = (page - 1) * per_page
+        end = start + per_page
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": cached_data[start:end]
+        }
+        
+    
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
@@ -1253,6 +1268,8 @@ def biodiversity_analysis(
         start = (page - 1) * per_page
         end = start + per_page
         paginated_results = results[start:end]
+        
+        save_to_cache("biodiversity/bio", results)
 
         return {
             "page": page,
@@ -1281,6 +1298,41 @@ def update_lesson_info(conn, university_name: str, lesson_name: str, msc_bsc: st
     except Exception as e:
         print(f"[ERROR] DB update failed for {lesson_name}: {e}")
 
+
+@app.get("/course_skills_matrix", tags=["Bilateral"], summary="List of all courses with their skill names")
+def course_skills_matrix():
+    """
+    Returns a list of lists, where each inner list contains the skill names of a course across all universities.
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    query = """
+        SELECT l.lesson_id, s.skill_name
+        FROM Lessons l
+        JOIN Skills s ON l.lesson_id = s.lesson_id
+        WHERE s.skill_name IS NOT NULL AND s.skill_name != ''
+        ORDER BY l.lesson_id
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        course_skills = defaultdict(list)
+        for row in rows:
+            course_skills[row["lesson_id"]].append(row["skill_name"])
+
+        return list(course_skills.values())
+
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.post("/crawl", tags=["Crawler"], summary="Start a web crawl")
