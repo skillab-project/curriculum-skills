@@ -4,7 +4,7 @@
         "university": "BTH",
         "department": "Computer Science",
         "degree": {
-            "type": "BSc",
+            "type": "MSc",
             "title": "Computer Science"
         },
         "skills": [
@@ -192,34 +192,6 @@
             "work with e-services available to citizens",
             "write research proposals",
             "write scientific publications"
-        ]
-    },
-    {
-        "country": "Sweden",
-        "university": "BTH",
-        "department": "Computer Science",
-        "degree": {
-            "type": "MSc",
-            "title": "Computer Science"
-        },
-        "skills": [
-            "Objective-C",
-            "arrange student accommodation",
-            "assess prior learning",
-            "compile course material",
-            "conduct participatory research",
-            "develop a pedagogical concept",
-            "draw conclusions from market research results",
-            "encourage students to acknowledge their achievements",
-            "implement cryptographic constructs",
-            "integrate and re-elaborate digital content",
-            "maintain data entry requirements",
-            "prepare syllabuses for vocational courses",
-            "research design",
-            "satisfy technical requirements",
-            "speak about your work in public",
-            "specialise in an area of history",
-            "teach writing"
         ]
     },
     {
