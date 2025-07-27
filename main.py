@@ -990,7 +990,7 @@ def get_skill_frequencies():
         cursor.close()
         conn.close()
 
-@app.get("/bilateral/labor_market_export", response_model=ExportResponse, tags=["Bilateral"])
+@app.get("/bilateral/labor_market_export", response_model=ExportResponse, tags=["Bilateral"], summary="List of all degrees with their Level 4 skills")
 def labor_export_from_database(
     university_name: str = Query(None, description="Optional university name to search for"),
     page: int = Query(1, ge=1, description="Page number (starts from 1)"),
@@ -1164,7 +1164,6 @@ def biodiversity_analysis(
     SELECT 
         u.university_name, u.country,
         l.lesson_id, l.lesson_name, l.semester, l.description,
-        l.msc_bsc, l.degree_title,
         s.skill_url, s.skill_name
     FROM University u
     JOIN Lessons l ON u.university_id = l.university_id
@@ -1192,7 +1191,7 @@ def biodiversity_analysis(
             lesson = row["lesson_name"] or ""
             description = row["description"] or ""
 
-            degree_type = row.get("msc_bsc", "Unknown")
+            degree_type = "MSc" if re.search(r"master|msc", lesson, re.IGNORECASE) else "BSc"
             degree_title = "Computer Science"
 
             if skill_url:
@@ -1299,41 +1298,152 @@ def update_lesson_info(conn, university_name: str, lesson_name: str, msc_bsc: st
     except Exception as e:
         print(f"[ERROR] DB update failed for {lesson_name}: {e}")
 
+@app.get("/course_skills_matrix", tags=["Bilateral"], summary="List of all courses with their Level 4 skills")
+def course_skills_matrix(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+):
+    cached_data = load_from_cache("biodiversity/course")
+    if cached_data:
+        total = len(cached_data)
+        start = (page - 1) * per_page
+        end = start + per_page
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": cached_data[start:end]
+        }
 
-@app.get("/course_skills_matrix", tags=["Bilateral"], summary="List of all courses with their skill names")
-def course_skills_matrix():
-    """
-    Returns a list of lists, where each inner list contains the skill names of a course across all universities.
-    """
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
     query = """
-        SELECT l.lesson_id, s.skill_name
-        FROM Lessons l
-        JOIN Skills s ON l.lesson_id = s.lesson_id
-        WHERE s.skill_name IS NOT NULL AND s.skill_name != ''
-        ORDER BY l.lesson_id
+    SELECT 
+        u.university_name, u.country,
+        l.lesson_id, l.lesson_name, l.semester, l.description,
+        l.msc_bsc, l.degree_title,
+        s.skill_url, s.skill_name
+    FROM University u
+    JOIN Lessons l ON u.university_id = l.university_id
+    LEFT JOIN Skills s ON l.lesson_id = s.lesson_id
+    WHERE s.skill_url IS NOT NULL AND s.skill_url != ''
     """
 
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = conn.cursor(dictionary=True)
+
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor(dictionary=True)
         cursor.execute(query)
         rows = cursor.fetchall()
+        print(f"[INFO] Retrieved {len(rows)} rows from database")
 
-        course_skills = defaultdict(list)
+        course_map = defaultdict(lambda: {
+            "lesson_id": None,
+            "lesson_name": "",
+            "university": "",
+            "country": "",
+            "msc_bsc": "",
+            "degree_title": "",
+            "skill_pairs": set()
+        })
+        skill_url_map = {}
+
         for row in rows:
-            course_skills[row["lesson_id"]].append(row["skill_name"])
+            lesson_id = row["lesson_id"]
+            course_map[lesson_id]["lesson_id"] = lesson_id
+            course_map[lesson_id]["lesson_name"] = row["lesson_name"] or ""
+            course_map[lesson_id]["university"] = row["university_name"]
+            course_map[lesson_id]["country"] = row["country"]
+            course_map[lesson_id]["msc_bsc"] = row.get("msc_bsc", "Unknown")
+            course_map[lesson_id]["degree_title"] = row.get("degree_title", "Unknown")
 
-        return list(course_skills.values())
+            skill_url = row["skill_url"]
+            skill_name = row["skill_name"]
+            if skill_url:
+                course_map[lesson_id]["skill_pairs"].add((skill_url, skill_name))
+                skill_url_map[skill_url] = skill_name
 
-    except mysql.connector.Error as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+        print(f"[INFO] Collected {len(skill_url_map)} unique skills across courses")
+
+        def get_level4_skill_ids(skill_ids: List[str]) -> Set[str]:
+            token = get_tracker_token()
+            headers = {
+                "accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Bearer {token}"
+            }
+            data = [("ids", sid) for sid in skill_ids]
+            data.append(("min_skill_level", "4"))
+            data.append(("max_skill_level", "4"))
+
+            try:
+                response = requests.post(
+                    "https://skillab-tracker.csd.auth.gr/api/skills",
+                    headers=headers,
+                    data=data,
+                    verify=False
+                )
+                response.raise_for_status()
+                items = response.json().get("items", [])
+                print(f"[DEBUG] API returned {len(items)} Level 4 skills")
+                return {item["id"] for item in items}
+            except Exception as e:
+                print(f"[ERROR] Failed to fetch Level 4 skills: {e}")
+                return set()
+
+        level4_skill_ids = set()
+        all_skill_urls = list(skill_url_map.keys())
+
+        for i in range(0, len(all_skill_urls), 50):
+            batch = all_skill_urls[i:i + 50]
+            level4_skill_ids.update(get_level4_skill_ids(batch))
+
+        print(f"[INFO] Final count of Level 4 skill URLs: {len(level4_skill_ids)}")
+
+        results = []
+
+        for course in course_map.values():
+            level4_skills = [
+                skill_url_map[url]
+                for (url, _) in course["skill_pairs"]
+                if url in level4_skill_ids
+            ]
+            if level4_skills:
+                results.append({
+                    "lesson_id": course["lesson_id"],
+                    "lesson_name": course["lesson_name"],
+                    "university": course["university"],
+                    "country": course["country"],
+                    "degree": {
+                        "type": course["msc_bsc"],
+                        "title": course["degree_title"]
+                    },
+                    "skills": sorted(set(level4_skills))
+                })
+
+        print(f"[INFO] Constructed result for {len(results)} courses with Level 4 skills")
+
+        total = len(results)
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated = results[start:end]
+
+        save_to_cache("biodiversity/course", results)
+
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": paginated
+        }
 
     finally:
         cursor.close()
         conn.close()
+
 
 
 @app.post("/crawl", tags=["Crawler"], summary="Start a web crawl")
