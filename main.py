@@ -1164,6 +1164,7 @@ def biodiversity_analysis(
     SELECT 
         u.university_name, u.country,
         l.lesson_id, l.lesson_name, l.semester, l.description,
+        l.msc_bsc, l.degree_title,
         s.skill_url, s.skill_name
     FROM University u
     JOIN Lessons l ON u.university_id = l.university_id
@@ -1191,7 +1192,7 @@ def biodiversity_analysis(
             lesson = row["lesson_name"] or ""
             description = row["description"] or ""
 
-            degree_type = "MSc" if re.search(r"master|msc", lesson, re.IGNORECASE) else "BSc"
+            degree_type = row.get("msc_bsc", "Unknown")
             degree_title = "Computer Science"
 
             if skill_url:
