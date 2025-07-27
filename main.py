@@ -1444,6 +1444,132 @@ def course_skills_matrix(
         cursor.close()
         conn.close()
 
+@app.get("/course_skill_urls_matrix", tags=["Bilateral"], summary="List of all courses with their Level 4 skill URLs")
+def course_skill_urls_matrix(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+):
+    cached_data = load_from_cache("biodiversity/course")
+
+    if cached_data is not None and all("skill_ids" in c for c in cached_data):
+        total = len(cached_data)
+        start = (page - 1) * per_page
+        end = start + per_page
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": [
+                {
+                    "lesson_id": course["lesson_id"],
+                    "lesson_name": course["lesson_name"],
+                    "university": course["university"],
+                    "country": course["country"],
+                    "degree": course["degree"],
+                    "skill_ids": course.get("skill_ids", [])
+                }
+                for course in cached_data[start:end]
+            ]
+        }
+
+    print("[INFO] Skill IDs missing from cache — recomputing...")
+
+    if cached_data is None:
+        raise HTTPException(status_code=500, detail="Cache not found. Run /course_skills_matrix first.")
+
+    query = """
+    SELECT 
+        l.lesson_id, s.skill_url, s.skill_name
+    FROM Lessons l
+    LEFT JOIN Skills s ON l.lesson_id = s.lesson_id
+    WHERE s.skill_url IS NOT NULL AND s.skill_url != ''
+    """
+
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        lesson_to_urls = defaultdict(set)
+        url_to_name = {}
+
+        for row in rows:
+            lesson_id = row["lesson_id"]
+            url = row["skill_url"]
+            name = row["skill_name"]
+            if url:
+                lesson_to_urls[lesson_id].add((url, name))
+                url_to_name[url] = name
+
+        def get_level4_skill_urls(skill_urls: List[str]) -> Set[str]:
+            token = get_tracker_token()
+            headers = {
+                "accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Bearer {token}"
+            }
+            data = [("ids", url) for url in skill_urls]
+            data.append(("min_skill_level", "4"))
+            data.append(("max_skill_level", "4"))
+
+            try:
+                response = requests.post(
+                    "https://skillab-tracker.csd.auth.gr/api/skills",
+                    headers=headers,
+                    data=data,
+                    verify=False
+                )
+                response.raise_for_status()
+                return {item["id"] for item in response.json().get("items", [])}
+            except Exception as e:
+                print(f"[ERROR] Tracker API call failed: {e}")
+                return set()
+
+        all_urls = list(url_to_name.keys())
+        level4_urls = set()
+        for i in range(0, len(all_urls), 50):
+            batch = all_urls[i:i + 50]
+            level4_urls.update(get_level4_skill_urls(batch))
+
+        print(f"[INFO] Found {len(level4_urls)} Level 4 skill URLs")
+
+        for course in cached_data:
+            lesson_id = course["lesson_id"]
+            skill_ids = [
+                url for (url, _) in lesson_to_urls.get(lesson_id, []) if url in level4_urls
+            ]
+            course["skill_ids"] = sorted(skill_ids)
+
+        save_to_cache("biodiversity/course", cached_data)
+
+        total = len(cached_data)
+        start = (page - 1) * per_page
+        end = start + per_page
+
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": ceil(total / per_page),
+            "results": [
+                {
+                    "lesson_id": course["lesson_id"],
+                    "lesson_name": course["lesson_name"],
+                    "university": course["university"],
+                    "country": course["country"],
+                    "degree": course["degree"],
+                    "skill_ids": course["skill_ids"]
+                }
+                for course in cached_data[start:end]
+            ]
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.post("/crawl", tags=["Crawler"], summary="Start a web crawl")
