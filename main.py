@@ -1590,6 +1590,97 @@ def course_skill_urls_matrix(
         cursor.close()
         conn.close()
 
+# Conda PYROOT Implementation - RUN LOCALLY WITH CONDA if want to utilize. Unmark comments.
+
+# @app.get("/PyROOT_skill_frequency_histogram", tags=["PyROOT"], response_class=HTMLResponse)
+# def generate_histogram():
+#     resp = requests.get("https://portal.skillab-project.eu/curriculum-skills/descriptive/skills_frequency")
+#     df = pd.DataFrame(resp.json())
+#     conn = mysql.connector.connect(**DB_CONFIG)
+#     cursor = conn.cursor(dictionary=True)
+#     cursor.execute("SELECT DISTINCT skill_name, skill_url FROM Skills")
+#     skill_url_map = {row["skill_name"]: row["skill_url"] for row in cursor.fetchall()}
+#     cursor.close()
+#     conn.close()
+
+#     def fetch_level(skill_url):
+#         try:
+#             res = requests.get(skill_url)
+#             if res.status_code == 200:
+#                 return res.json().get("level")
+#         except:
+#             return None
+#         return None
+
+#     def assign_category(skill_name):
+#         url = skill_url_map.get(skill_name)
+#         level = fetch_level(url) if url else None
+#         if level in [4, 5]:
+#             return "hard"
+#         elif level in [1, 2, 3]:
+#             return "soft"
+#         return "unknown"
+
+#     df["category"] = df["skill"].apply(assign_category)
+#     f = TFile("skills.root", "RECREATE")
+#     tree = TTree("skills", "Skill Frequency Tree")
+#     skill = np.array(b"", dtype='S60')
+#     freq = np.zeros(1, dtype='i')
+#     category = np.array(b"", dtype='S10')
+#     tree.Branch("skill", skill, "skill/C")
+#     tree.Branch("frequency", freq, "frequency/I")
+#     tree.Branch("category", category, "category/C")
+
+#     for _, row in df.iterrows():
+#         skill[0] = row["skill"].encode()
+#         freq[0] = int(row["frequency"])
+#         category[0] = row["category"].encode()
+#         tree.Fill()
+
+#     tree.Write()
+#     f.Close()
+#     f = TFile("skills.root")
+#     tree = f.Get("skills")
+#     max_freq = max(df["frequency"].max(), 100)
+
+#     h_hard = TH1F("h_hard", "Hard Skills", 100, 0, max_freq)
+#     h_soft = TH1F("h_soft", "Soft Skills", 100, 0, max_freq)
+
+#     for entry in tree:
+#         if entry.category.decode() == "hard":
+#             h_hard.Fill(entry.frequency)
+#         elif entry.category.decode() == "soft":
+#             h_soft.Fill(entry.frequency)
+
+#     c = TCanvas()
+#     h_hard.SetLineColor(4)
+#     h_soft.SetLineColor(2)
+#     h_hard.SetTitle("Skill Frequency Histogram;Frequency;Count")
+#     h_hard.Draw()
+#     h_soft.Draw("SAME")
+
+#     legend = TLegend(0.7, 0.7, 0.9, 0.85)
+#     legend.AddEntry(h_hard, "Hard Skills", "l")
+#     legend.AddEntry(h_soft, "Soft Skills", "l")
+#     legend.Draw()
+
+#     c.SaveAs("skills_histogram.png")
+#     html = """
+#     <html>
+#         <head><title>Skill Histogram</title></head>
+#         <body>
+#             <h2>Hard vs Soft Skills Histogram (ROOT)</h2>
+#             <img src="/PyROOT_skill_histogram_image" alt="Skill Histogram" style="width:800px;">
+#         </body>
+#     </html>
+#     """
+#     return HTMLResponse(content=html)
+
+# @app.get("/PyROOT_skill_histogram_image", tags=["PyROOT"])
+# def get_histogram_image():
+#     return FileResponse("skills_histogram.png", media_type="image/png")
+
+
 
 @app.post("/crawl", tags=["Crawler"], summary="Start a web crawl")
 def crawl_university(request: CrawlRequest):
