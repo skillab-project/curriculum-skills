@@ -451,9 +451,11 @@ def calculate_skillnames(university_name: str, lesson_name: Optional[str] = None
     return {"university_name": university_name, "skills": extracted_skills}
 
 
-
 @app.get("/search_skill", tags=["Queries"])
-def search_skill(request: SkillSearchRequest):
+def search_skill(
+    skill: str = Query(..., description="Skill name"),
+    university: Optional[str] = Query(None, description="University name")
+):
     """
     You can search if a skill exists in the database.
     In return:
@@ -464,12 +466,14 @@ def search_skill(request: SkillSearchRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
-    results = search_courses_by_skill_database(request.skill, DB_CONFIG, request.university)
+    results = search_courses_by_skill_database(skill, DB_CONFIG, university)
     return {"results": results}
 
-
 @app.get("/search_skill_by_URL", tags=["Queries"])
-def search_skill_url(request: SkillSearchURLRequest):
+def search_skill_by_url(
+    skill_url: str = Query(..., description="Skill URL"),
+    university: Optional[str] = Query(None, description="University name")
+):
     """
     You can search if a skill exists in the database.
     In return:
@@ -480,12 +484,14 @@ def search_skill_url(request: SkillSearchURLRequest):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
-    results = search_courses_by_skill_url(request.skill_url, DB_CONFIG, request.university)
+    results = search_courses_by_skill_url(skill_url, DB_CONFIG, university)
     return {"results": results}
 
 
 @app.get("/get_universities_by_skills", tags=["Queries"])
-def get_universities_by_skills(request: SkillListRequest):
+def get_universities_by_skills(
+    skills: List[str] = Query(..., description="List of skills to search for")
+):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
@@ -497,13 +503,13 @@ def get_universities_by_skills(request: SkillListRequest):
         WHERE s.skill_name IN (%s)
     """
     
-    skill_placeholders = ', '.join(['%s'] * len(request.skills))
+    skill_placeholders = ', '.join(['%s'] * len(skills))
     formatted_query = query.replace("%s", skill_placeholders)
     
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)
-        cursor.execute(formatted_query, tuple(request.skills))
+        cursor.execute(formatted_query, tuple(skills))
         results = cursor.fetchall()
     
         university_skill_counts = {}
@@ -526,7 +532,7 @@ def get_universities_by_skills(request: SkillListRequest):
         
         filtered_universities = {
             uni: courses for uni, courses in university_courses.items()
-            if len(university_skill_counts[uni]) == len(request.skills)
+            if len(university_skill_counts[uni]) == len(skills)
         }
     
     except mysql.connector.Error as e:
@@ -538,8 +544,13 @@ def get_universities_by_skills(request: SkillListRequest):
     
     return filtered_universities
 
+from fastapi import Query
+
 @app.get("/get_top_skills", tags=["Queries"])
-def get_top_skills(request: TopSkillsRequest):
+def get_top_skills(
+    university_name: str = Query(..., description="University name"),
+    top_n: int = Query(20, description="Number of top skills to return")
+):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
@@ -553,16 +564,15 @@ def get_top_skills(request: TopSkillsRequest):
       AND s.skill_name != ''
       AND s.skill_name NOT LIKE 'Unknown%'
     """
-
     
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)
-        cursor.execute(query, (request.university_name,))
+        cursor.execute(query, (university_name,))
         results = cursor.fetchall()
         
         skill_counter = Counter(row["skill_name"] for row in results)
-        top_skills = [{"skill": skill, "frequency": count} for skill, count in skill_counter.most_common(request.top_n)]
+        top_skills = [{"skill": skill, "frequency": count} for skill, count in skill_counter.most_common(top_n)]
         
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
@@ -571,11 +581,12 @@ def get_top_skills(request: TopSkillsRequest):
         cursor.close()
         conn.close()
     
-    return {"university_name": request.university_name, "top_skills": top_skills}
-
+    return {"university_name": university_name, "top_skills": top_skills}
 
 @app.get("/get_top_skills_all", tags=["Queries"])
-def get_top_skills_all(request: TopSkillsAllRequest):
+def get_top_skills_all(
+    top_n: int = Query(20, description="Number of top skills to return")
+):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
@@ -598,8 +609,11 @@ def get_top_skills_all(request: TopSkillsAllRequest):
         for row in results:
             university_skill_map[row["skill_name"].lower()].add(row["university_name"])
         
-        top_skills = [{"skill": skill, "frequency": count, "universities": list(university_skill_map[skill.lower()])} 
-                      for skill, count in skill_counter.most_common(request.top_n)]
+        top_skills = [{
+            "skill": skill,
+            "frequency": count,
+            "universities": list(university_skill_map[skill.lower()])
+        } for skill, count in skill_counter.most_common(top_n)]
         
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
@@ -609,6 +623,7 @@ def get_top_skills_all(request: TopSkillsAllRequest):
         conn.close()
     
     return {"top_skills": top_skills}
+
 
 
 @app.get("/search_json_in_cache", tags=["Cache"])
@@ -696,7 +711,9 @@ def save_to_db(university_name: str):
 CACHE_FOLDER = "cache"
 
 @app.get("/all_university_data", tags=["Database"])
-def get_all_data(university_name: str):
+def get_all_data(
+    university_name: str = Query(..., description="Full or partial university name")
+):
     """
     Fetch all university-related data, including lessons and skills, from the MySQL database.
     If the database is offline, raise an error immediately.
@@ -720,10 +737,9 @@ def get_all_data(university_name: str):
     WHERE u.university_name LIKE %s
     """
 
-    conn = mysql.connector.connect(**DB_CONFIG)
-    cursor = conn.cursor(dictionary=True)  
-
     try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)  
         cursor.execute(query, (f"%{university_name}%",))
         results = cursor.fetchall()
 
@@ -761,6 +777,9 @@ def get_all_data(university_name: str):
                         )
 
         return university_data
+
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
     finally:
         cursor.close()
