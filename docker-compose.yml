@@ -8,8 +8,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: skillcrawl
-      API_TRACKER_BASE_URL=https://skillab-tracker.csd.auth.gr/api
-      API_SKILL_EXTRACTOR_BASE_URL=https://portal.skillab-project.eu/esco-skill-extractor
+      API_TRACKER_BASE_URL: https://skillab-tracker.csd.auth.gr/api
+      API_SKILL_EXTRACTOR_BASE_URL: https://portal.skillab-project.eu/esco-skill-extractor
     ports:
       - "3306:3306"
     volumes:
