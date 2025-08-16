@@ -1,0 +1,9 @@
+{
+	"id": "3ScBA25ZBzABfty",
+	"json": "{\"id\":\"3ScBA25ZBzABfty\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA467\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA467\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:38.335Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA467",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA467"
+}

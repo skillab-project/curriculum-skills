@@ -1,0 +1,474 @@
+{
+  "results": {
+    "BTH": {
+      "Semester 1 (3 lessons)": {
+        "PROGRAMMING IN UNIX ENVIRONMENT": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 1
+          }
+        ]
+      }
+    },
+    "Delft University of Technology": {
+      "Semester 1 (6 lessons)": {
+        "THE BUILDING BLOCKS OF A QUANTUM COMPUTER: PART 2": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 2
+          }
+        ],
+        "THE BUILDING BLOCKS OF A QUANTUM COMPUTER: PART 1": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 3
+          }
+        ]
+      }
+    },
+    "EPFL": {
+      "Semester 1 (10 lessons)": {
+        "NUMERICAL METHODS FOR VISUAL COMPUTING AND ML": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 4
+          }
+        ]
+      },
+      "Semester 3 (8 lessons)": {
+        "EMBEDDED SYSTEMS FIRMWARE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 5
+          }
+        ]
+      },
+      "Semester 4 (12 lessons)": {
+        "DATA-INTENSIVE SYSTEMS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 6
+          }
+        ],
+        "PARALLELISM AND CONCURRENCY IN SOFTWARE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 7
+          }
+        ],
+        "COMPUTER LANGUAGE PROCESSING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 8
+          }
+        ]
+      }
+    },
+    "ETH Zurich": {
+      "Semester 1 (5 lessons)": {
+        "PREPARATORY COURSE COMPUTER SCIENCE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 9
+          }
+        ]
+      },
+      "Semester 2 (6 lessons)": {
+        "COMPUTER SCIENCE I": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 10
+          }
+        ]
+      },
+      "Semester 3 (7 lessons)": {
+        "COMPUTER SCIENCE II": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 11
+          }
+        ]
+      },
+      "Semester 4 (6 lessons)": {
+        "COMPUTER ENGINEERING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 12
+          }
+        ]
+      }
+    },
+    "Imperial College": {
+      "Semester 2 (13 lessons)": {
+        "LABORATORY 2": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 13
+          }
+        ]
+      },
+      "Semester 3 (42 lessons)": {
+        "ADVANCED COMPUTER ARCHITECTURE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 14
+          }
+        ]
+      }
+    },
+    "Johannes Kepler University": {
+      "Lessons Only": {
+        "UE COMPILER CONSTRUCTION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 15
+          }
+        ],
+        "VL COMPILER CONSTRUCTION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 16
+          }
+        ],
+        "KV ADVANCED COMPILER CONSTRUCTION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 17
+          }
+        ]
+      }
+    },
+    "Technische Universitat Munchen": {
+      "Lessons Only": {
+        "INTRODUCTION TO COMPUTER SCIENCE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 18
+          }
+        ],
+        "FUNCTIONAL PROGRAMMING AND VERIFICATION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 19
+          }
+        ],
+        "BASIC PRACTICAL COURSE: COMPUTER ARCHITECTURE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 20
+          }
+        ],
+        "INTERNSHIP: REAL-TIME COMPUTER GRAPHICS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 21
+          }
+        ],
+        "PATTERNS IN SOFTWARE ENGINEERING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 22
+          }
+        ],
+        "ADVANCED CONCEPTS OF PROGRAMMING LANGUAGES": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 23
+          }
+        ],
+        "COMPILER CONSTRUCTION I": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 24
+          }
+        ],
+        "PROGRAM OPTIMIZATION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 25
+          }
+        ],
+        "CONCEPTS OF C++ PROGRAMMING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 26
+          }
+        ]
+      }
+    },
+    "University College London": {
+      "Semester 3 (2 lessons)": {
+        "COMPILERS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 27
+          }
+        ]
+      },
+      "Semester 4 (15 lessons)": {
+        "COMPUTER SYSTEMS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 28
+          }
+        ]
+      }
+    },
+    "University of Amsterdam": {
+      "Semester 2 (8 lessons)": {
+        "ENERGY-EFFICIENT EDGE COMPUTING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 29
+          }
+        ],
+        "MULTI-CORE PROCESSOR SYSTEMS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 30
+          }
+        ]
+      }
+    },
+    "University of Cambridge": {
+      "Semester 1 (8 lessons)": {
+        "FOUNDATIONS OF COMPUTER SCIENCE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 31
+          }
+        ]
+      },
+      "Semester 3 (10 lessons)": {
+        "ECAD AND ARCHITECTURE PRACTICAL CLASSES": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 32
+          }
+        ],
+        "PROGRAMMING IN C AND C++": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 33
+          }
+        ]
+      },
+      "Semester 4 (10 lessons)": {
+        "COMPILER CONSTRUCTION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 34
+          }
+        ]
+      },
+      "Semester 6 (17 lessons)": {
+        "OPTIMISING COMPILERS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 35
+          }
+        ],
+        "MULTICORE SEMANTICS AND PROGRAMMING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 36
+          }
+        ]
+      },
+      "Semester 7 (20 lessons)": {
+        "UNDERSTANDING QUANTUM ARCHITECTURE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 37
+          }
+        ]
+      },
+      "Semester 8 (15 lessons)": {
+        "CRYPTOGRAPHY AND PROTOCOL ENGINEERING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 38
+          }
+        ],
+        "MULTICORE SEMANTICS AND PROGRAMMING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 39
+          }
+        ],
+        "UNDERSTANDING NETWORKED-SYSTEMS PERFORMANCE": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 40
+          }
+        ]
+      }
+    },
+    "University of Groningen": {
+      "Semester 3 (19 lessons)": {
+        "COMPILER CONSTRUCTION": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 41
+          }
+        ],
+        "PROGRAMMING IN C++": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 42
+          }
+        ],
+        "ADVANCED PROGRAMMING IN C++": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 43
+          }
+        ]
+      }
+    },
+    "University of Luxembourg": {
+      "Semester 4 (7 lessons)": {
+        "PRACTICAL FUNCTIONAL PROGRAMMING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 44
+          }
+        ],
+        "INTELLIGENT SYSTEMS 1": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 45
+          }
+        ],
+        "PROGRAMMING LANGUAGES": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 46
+          }
+        ]
+      }
+    },
+    "University of Macedonia": {
+      "Semester 1 (7 lessons)": {
+        "PROCEDURAL PROGRAMMING- CS-IS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 47
+          }
+        ]
+      },
+      "Semester 4 (11 lessons)": {
+        "SOFTWARE ENGINEERING- CS": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 48
+          }
+        ]
+      },
+      "Semester 8 (22 lessons)": {
+        "PROGRAMMING LANGUAGES AND COMPILERS- AI": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 49
+          }
+        ]
+      }
+    },
+    "University of York": {
+      "Semester 1 (5 lessons)": {
+        "INTRODUCTION TO COMPUTER ARCHITECTURES": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 50
+          }
+        ]
+      }
+    },
+    "Utrecht University": {
+      "Semester 1 (12 lessons)": {
+        "DOMAIN-SPECIFIC LANGUAGES": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 51
+          }
+        ]
+      }
+    },
+    "VU University": {
+      "Lessons Only": {
+        "COMPUTER PROGRAMMING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 52
+          }
+        ],
+        "PERVASIVE COMPUTING": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 53
+          }
+        ],
+        "SYSTEMS PROGRAMMING PROJECT": [
+          {
+            "skill": "C++",
+            "score": 100,
+            "frequency": 54
+          }
+        ]
+      }
+    }
+  }
+}

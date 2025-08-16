@@ -1,0 +1,9 @@
+{
+	"id": "v3SPTqC8q0RYwph",
+	"json": "{\"id\":\"v3SPTqC8q0RYwph\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/further-training/faq---further-training-and-competence-development-courses\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/further-training/faq---further-training-and-competence-development-courses\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:50.953Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/further-training/faq---further-training-and-competence-development-courses",
+	"url": "https://www.mdu.se/en/malardalen-university/education/further-training/faq---further-training-and-competence-development-courses"
+}

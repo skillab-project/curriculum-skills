@@ -1,0 +1,9 @@
+{
+	"id": "zCXHWketnMbzphK",
+	"json": "{\"id\":\"zCXHWketnMbzphK\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/study-at-mdu\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/study-at-mdu\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:53.924Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/study-at-mdu",
+	"url": "https://www.mdu.se/en/malardalen-university/education/study-at-mdu"
+}

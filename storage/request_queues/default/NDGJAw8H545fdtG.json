@@ -1,0 +1,9 @@
+{
+	"id": "NDGJAw8H545fdtG",
+	"json": "{\"id\":\"NDGJAw8H545fdtG\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/international/get-to-know-mdu/campus-vasteras\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/international/get-to-know-mdu/campus-vasteras\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:55.907Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/international/get-to-know-mdu/campus-vasteras",
+	"url": "https://www.mdu.se/en/malardalen-university/education/international/get-to-know-mdu/campus-vasteras"
+}

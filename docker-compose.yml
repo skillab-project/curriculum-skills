@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: mysql-skillcrawl
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: skillcrawl
+      API_TRACKER_BASE_URL=https://skillab-tracker.csd.auth.gr/api
+      API_SKILL_EXTRACTOR_BASE_URL=https://portal.skillab-project.eu/esco-skill-extractor
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./sql_init:/docker-entrypoint-initdb.d
+
+  fastapi-service:
+    depends_on:
+      - db
+    container_name: ${APP_NAME}
+    build: .
+    image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
+    ports:
+      - "5002:8000"
+    volumes:
+      - ./cache:/app/cache
+      - ./curriculum:/app/curriculum
+      - ./crawler_json:/app/crawler_json
+      - .:/app
+      - ./world_universities_and_domains.json:/mnt/data/world_universities_and_domains.json:ro
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - UVICORN_WORKERS=1
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=root
+      - DB_NAME=skillcrawl
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/curriculum-skills/health >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

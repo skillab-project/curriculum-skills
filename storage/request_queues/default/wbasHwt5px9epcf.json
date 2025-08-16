@@ -1,0 +1,9 @@
+{
+	"id": "wbasHwt5px9epcf",
+	"json": "{\"id\":\"wbasHwt5px9epcf\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/course-syllabus\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/course-syllabus\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:57.596Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/course-syllabus",
+	"url": "https://www.mdu.se/en/malardalen-university/education/course-syllabus"
+}

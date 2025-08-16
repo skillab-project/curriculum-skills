@@ -1,0 +1,9 @@
+{
+	"id": "cMyqzMWdPX8bO7T",
+	"json": "{\"id\":\"cMyqzMWdPX8bO7T\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/international/programme/masters-programme-in-software-engineering\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/international/programme/masters-programme-in-software-engineering\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:11:00.087Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/international/programme/masters-programme-in-software-engineering",
+	"url": "https://www.mdu.se/en/malardalen-university/education/international/programme/masters-programme-in-software-engineering"
+}

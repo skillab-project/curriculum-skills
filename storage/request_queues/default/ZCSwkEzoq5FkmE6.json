@@ -1,0 +1,9 @@
+{
+	"id": "ZCSwkEzoq5FkmE6",
+	"json": "{\"id\":\"ZCSwkEzoq5FkmE6\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/further-training\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/further-training\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:15.036Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/further-training",
+	"url": "https://www.mdu.se/en/malardalen-university/education/further-training"
+}

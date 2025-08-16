@@ -1,0 +1,9 @@
+{
+	"id": "wB9C1JlEX3JVIGV",
+	"json": "{\"id\":\"wB9C1JlEX3JVIGV\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA479\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA479\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:47.963Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA479",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA479"
+}

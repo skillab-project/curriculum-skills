@@ -1,0 +1,9 @@
+{
+	"id": "4Dfnk4xgqITTqYK",
+	"json": "{\"id\":\"4Dfnk4xgqITTqYK\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/further-training/it-and-computer-science\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/further-training/it-and-computer-science\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"state\":3}},\"handledAt\":\"2025-08-14T12:10:10.909Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/further-training/it-and-computer-science",
+	"url": "https://www.mdu.se/en/malardalen-university/education/further-training/it-and-computer-science"
+}

@@ -1,0 +1,9 @@
+{
+	"id": "RCUaoRClbpLs5bh",
+	"json": "{\"id\":\"RCUaoRClbpLs5bh\",\"url\":\"https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-25-the-preview-in-eskilstuna\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-25-the-preview-in-eskilstuna\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:11:04.250Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-25-the-preview-in-eskilstuna",
+	"url": "https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-25-the-preview-in-eskilstuna"
+}

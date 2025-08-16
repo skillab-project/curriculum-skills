@@ -1,0 +1,9 @@
+{
+	"id": "pyY8ZUtjrZfaU36",
+	"json": "{\"id\":\"pyY8ZUtjrZfaU36\",\"url\":\"https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-26-the-preview-in-vasteras\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-26-the-preview-in-vasteras\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:11:04.313Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-26-the-preview-in-vasteras",
+	"url": "https://www.mdu.se/en/malardalen-university/calendar/archive/2025-08-26-the-preview-in-vasteras"
+}

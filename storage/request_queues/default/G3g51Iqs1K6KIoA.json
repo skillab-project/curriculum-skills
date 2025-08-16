@@ -1,0 +1,9 @@
+{
+	"id": "G3g51Iqs1K6KIoA",
+	"json": "{\"id\":\"G3g51Iqs1K6KIoA\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=PPU483\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=PPU483\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:26.107Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=PPU483",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=PPU483"
+}

@@ -1,0 +1,9 @@
+{
+	"id": "2f8KVZjZhjxxh8U",
+	"json": "{\"id\":\"2f8KVZjZhjxxh8U\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA468\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA468\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:45.573Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA468",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA468"
+}

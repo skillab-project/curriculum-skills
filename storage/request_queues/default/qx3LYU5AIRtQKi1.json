@@ -1,0 +1,9 @@
+{
+	"id": "qx3LYU5AIRtQKi1",
+	"json": "{\"id\":\"qx3LYU5AIRtQKi1\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA471\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA471\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:44.488Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA471",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA471"
+}

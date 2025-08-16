@@ -1,0 +1,59 @@
+{
+  "requestsFinished": 50,
+  "requestsFailed": 92,
+  "requestsRetries": 92,
+  "requestsFailedPerMinute": 89,
+  "requestsFinishedPerMinute": 48,
+  "requestMinDurationMillis": 1370,
+  "requestMaxDurationMillis": 4723,
+  "requestTotalFailedDurationMillis": 902,
+  "requestTotalFinishedDurationMillis": 100656,
+  "crawlerStartedAt": "2025-08-14T12:10:06.157Z",
+  "crawlerFinishedAt": "2025-08-14T12:11:07.947Z",
+  "statsPersistedAt": "2025-08-14T12:11:07.947Z",
+  "crawlerRuntimeMillis": 61873,
+  "crawlerLastStartTimestamp": 1755173406074,
+  "requestRetryHistogram": [
+    50,
+    null,
+    null,
+    92
+  ],
+  "statsId": 0,
+  "requestAvgFailedDurationMillis": 10,
+  "requestAvgFinishedDurationMillis": 2013,
+  "requestTotalDurationMillis": 101558,
+  "requestsTotal": 142,
+  "requestsWithStatusCode": {},
+  "errors": {
+    "/app/apify.js:103:39": {
+      "missing error code": {
+        "Error": {
+          "browserContext.newPage: Target page, context or browser has been closed": {
+            "count": 92
+          }
+        }
+      }
+    }
+  },
+  "retryErrors": {
+    "/app/apify.js:120:35": {
+      "missing error code": {
+        "Error": {
+          "page.evaluate: Target page, context or browser has been closed": {
+            "count": 3
+          }
+        }
+      }
+    },
+    "/app/apify.js:103:39": {
+      "missing error code": {
+        "Error": {
+          "browserContext.newPage: Target page, context or browser has been closed": {
+            "count": 273
+          }
+        }
+      }
+    }
+  }
+}

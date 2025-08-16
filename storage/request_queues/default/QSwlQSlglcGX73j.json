@@ -1,0 +1,9 @@
+{
+	"id": "QSwlQSlglcGX73j",
+	"json": "{\"id\":\"QSwlQSlglcGX73j\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA486\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA486\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:27.557Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA486",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=DVA486"
+}

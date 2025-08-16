@@ -1,0 +1,9 @@
+{
+	"id": "TJ7QDMfor9vXr6U",
+	"json": "{\"id\":\"TJ7QDMfor9vXr6U\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/find-education?query=&page=0&educationType=courses\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/find-education?educationType=courses&page=0&query=\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:52.240Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/find-education?educationType=courses&page=0&query=",
+	"url": "https://www.mdu.se/en/malardalen-university/education/find-education?query=&page=0&educationType=courses"
+}

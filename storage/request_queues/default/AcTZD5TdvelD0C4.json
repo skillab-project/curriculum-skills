@@ -1,0 +1,9 @@
+{
+	"id": "AcTZD5TdvelD0C4",
+	"json": "{\"id\":\"AcTZD5TdvelD0C4\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/international/exchange-studies\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/international/exchange-studies\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:11:00.224Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/international/exchange-studies",
+	"url": "https://www.mdu.se/en/malardalen-university/education/international/exchange-studies"
+}

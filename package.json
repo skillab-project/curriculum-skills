@@ -1,0 +1,7 @@
+{
+  "type": "module",
+  "dependencies": {
+    "crawlee": "^3",
+    "playwright-core": "^1.46.0"
+  }
+}

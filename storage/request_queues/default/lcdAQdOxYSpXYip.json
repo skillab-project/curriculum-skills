@@ -1,0 +1,9 @@
+{
+	"id": "lcdAQdOxYSpXYip",
+	"json": "{\"id\":\"lcdAQdOxYSpXYip\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=OAI400\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/courses?kod=OAI400\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:37.447Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/courses?kod=OAI400",
+	"url": "https://www.mdu.se/en/malardalen-university/education/courses?kod=OAI400"
+}

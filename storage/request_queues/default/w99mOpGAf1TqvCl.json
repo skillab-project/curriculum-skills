@@ -1,0 +1,9 @@
+{
+	"id": "w99mOpGAf1TqvCl",
+	"json": "{\"id\":\"w99mOpGAf1TqvCl\",\"url\":\"https://www.mdu.se/en/malardalen-university/education/application-and-admission/admission-regulations\",\"uniqueKey\":\"https://www.mdu.se/en/malardalen-university/education/application-and-admission/admission-regulations\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":2,\"state\":3}},\"handledAt\":\"2025-08-14T12:10:56.223Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://www.mdu.se/en/malardalen-university/education/application-and-admission/admission-regulations",
+	"url": "https://www.mdu.se/en/malardalen-university/education/application-and-admission/admission-regulations"
+}

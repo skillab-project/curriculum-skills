@@ -1,0 +1,205 @@
+{
+  "university_name": "university of cambridge",
+  "top_skills": [
+    {
+      "skill": "analyse goal progress",
+      "frequency": 78
+    },
+    {
+      "skill": "perform lectures",
+      "frequency": 73
+    },
+    {
+      "skill": "read books",
+      "frequency": 51
+    },
+    {
+      "skill": "prepare syllabuses for vocational courses",
+      "frequency": 34
+    },
+    {
+      "skill": "promote education course",
+      "frequency": 32
+    },
+    {
+      "skill": "develop course outline",
+      "frequency": 27
+    },
+    {
+      "skill": "machine learning",
+      "frequency": 27
+    },
+    {
+      "skill": "arrange student accommodation",
+      "frequency": 23
+    },
+    {
+      "skill": "study topics",
+      "frequency": 21
+    },
+    {
+      "skill": "design graphics",
+      "frequency": 20
+    },
+    {
+      "skill": "application process",
+      "frequency": 19
+    },
+    {
+      "skill": "assessment processes",
+      "frequency": 18
+    },
+    {
+      "skill": "supervise practical courses",
+      "frequency": 17
+    },
+    {
+      "skill": "hardware architectures",
+      "frequency": 17
+    },
+    {
+      "skill": "computer programming",
+      "frequency": 17
+    },
+    {
+      "skill": "implement cryptographic constructs",
+      "frequency": 16
+    },
+    {
+      "skill": "systems theory",
+      "frequency": 16
+    },
+    {
+      "skill": "assign homework",
+      "frequency": 15
+    },
+    {
+      "skill": "scientific computing",
+      "frequency": 15
+    },
+    {
+      "skill": "logic",
+      "frequency": 14
+    },
+    {
+      "skill": "artificial neural networks",
+      "frequency": 14
+    },
+    {
+      "skill": "Moodle",
+      "frequency": 13
+    },
+    {
+      "skill": "assist passengers with timetable information",
+      "frequency": 13
+    },
+    {
+      "skill": "verify feasibility",
+      "frequency": 12
+    },
+    {
+      "skill": "grammar",
+      "frequency": 12
+    },
+    {
+      "skill": "calculate probabilities",
+      "frequency": 12
+    },
+    {
+      "skill": "assess students",
+      "frequency": 12
+    },
+    {
+      "skill": "numerical sequences",
+      "frequency": 11
+    },
+    {
+      "skill": "compile course material",
+      "frequency": 11
+    },
+    {
+      "skill": "data models",
+      "frequency": 11
+    },
+    {
+      "skill": "apply scientific methods",
+      "frequency": 11
+    },
+    {
+      "skill": "semantics",
+      "frequency": 11
+    },
+    {
+      "skill": "C++",
+      "frequency": 10
+    },
+    {
+      "skill": "training  subject expertise",
+      "frequency": 10
+    },
+    {
+      "skill": "gather data",
+      "frequency": 10
+    },
+    {
+      "skill": "quantum mechanics",
+      "frequency": 10
+    },
+    {
+      "skill": "distributed computing",
+      "frequency": 10
+    },
+    {
+      "skill": "information structure",
+      "frequency": 10
+    },
+    {
+      "skill": "use concurrent programming",
+      "frequency": 10
+    },
+    {
+      "skill": "learning technologies",
+      "frequency": 10
+    },
+    {
+      "skill": "maintain students' discipline",
+      "frequency": 10
+    },
+    {
+      "skill": "make decisions",
+      "frequency": 9
+    },
+    {
+      "skill": "mathematics",
+      "frequency": 9
+    },
+    {
+      "skill": "think abstractly",
+      "frequency": 9
+    },
+    {
+      "skill": "use automatic programming",
+      "frequency": 9
+    },
+    {
+      "skill": "set theory",
+      "frequency": 9
+    },
+    {
+      "skill": "perform multiple tasks at the same time",
+      "frequency": 9
+    },
+    {
+      "skill": "types of evaluation ",
+      "frequency": 9
+    },
+    {
+      "skill": "geometry",
+      "frequency": 9
+    },
+    {
+      "skill": "human-computer interaction",
+      "frequency": 9
+    }
+  ]
+}
