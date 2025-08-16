@@ -1851,6 +1851,78 @@ def get_top_skills_all(
         cursor.close()
         conn.close()
 
+@app.get("/course_skills_matrix", tags=["Bilateral"], summary="List of courses with Level-4 skill names")
+def course_skills_matrix(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+):
+    """
+    Returns a paginated list of courses with **Level-4 skill names** only
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    sql = """
+        SELECT c.lesson_name, s.skill_name
+        FROM Course c
+        JOIN CourseSkill cs ON c.course_id = cs.course_id
+        JOIN Skill s ON cs.skill_id = s.skill_id
+        WHERE s.esco_level IN ('4', 4)
+    """
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        results = defaultdict(list)
+        for r in rows:
+            results[r["lesson_name"]].append(r["skill_name"])
+        results_list = [{"course": k, "skills": v} for k, v in results.items()]
+
+        total = len(results_list)
+        start = (page - 1) * per_page
+        return results_list[start:start + per_page]
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/course_skill_urls_matrix", tags=["Bilateral"], summary="List of courses with Level-4 skill URLs")
+def course_skill_urls_matrix(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+):
+    """
+    Returns a paginated list of courses with **Level-4 ESCO skill URLs**
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    sql = """
+        SELECT c.lesson_name, s.skill_url
+        FROM Course c
+        JOIN CourseSkill cs ON c.course_id = cs.course_id
+        JOIN Skill s ON cs.skill_id = s.skill_id
+        WHERE s.esco_level IN ('4', 4)
+    """
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        results = defaultdict(list)
+        for r in rows:
+            results[r["lesson_name"]].append(r["skill_url"])
+        results_list = [{"course": k, "skills": v} for k, v in results.items()]
+
+        total = len(results_list)
+        start = (page - 1) * per_page
+        return results_list[start:start + per_page]
+    finally:
+        cursor.close()
+        conn.close()
+
+
 
 @app.post(
     "/db/save_labels",
@@ -2470,6 +2542,8 @@ def biodiversity_analysis(
                         combo_map[key].add((su, sn))
 
         results = []
+        seen = set()
+
         for (country, uni, dept, deg_title, deg_type, lesson_name), pairs in combo_map.items():
             if dept == "Unknown" and deg_title == "Unknown":
                 continue
@@ -2477,6 +2551,11 @@ def biodiversity_analysis(
             names = sorted({skill_url_map[u] for (u, _) in pairs if skill_url_map.get(u)})
             if not names:
                 continue
+
+            signature = (lesson_name.strip().lower(), tuple(names))
+            if signature in seen:
+                continue
+            seen.add(signature)
 
             results.append({
                 "country": country or "Unknown",
