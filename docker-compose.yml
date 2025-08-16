@@ -24,10 +24,8 @@ services:
     ports:
       - "5002:8000"
     volumes:
-      - ./cache:/app/cache
       - ./curriculum:/app/curriculum
       - ./crawler_json:/app/crawler_json
-      - .:/app
       - ./world_universities_and_domains.json:/mnt/data/world_universities_and_domains.json:ro
     env_file:
       - .env
