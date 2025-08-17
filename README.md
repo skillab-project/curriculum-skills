@@ -19,7 +19,7 @@ Everything from skill extraction to **automatic university detection** and **web
 ---
 
 <p align="center">
-  <a href="https://huggingface.co/skillab-project/CurricuNLP" target="_blank">
+  <a href="https://huggingface.co/marfoli/CurricuNLP" target="_blank">
     <img src="https://img.shields.io/badge/View%20CurricuNLP%20on-HuggingFace-purple?logo=huggingface" alt="View CurricuNLP on HuggingFace" />
   </a>
 </p>
@@ -124,3 +124,4 @@ git lfs install   # to download the SQL files tracked via LFS
 * The crawler respects depth limits and only follows relevant curriculum links.
 
 ---
+
