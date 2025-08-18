@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  db:
+  mysql-curriculum-skill:
     image: mysql:8.0
-    container_name: mysql-skillcrawl
+    container_name: mysql-curriculum-skill
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root
@@ -11,14 +11,15 @@ services:
       API_TRACKER_BASE_URL: https://skillab-tracker.csd.auth.gr/api
       API_SKILL_EXTRACTOR_BASE_URL: https://portal.skillab-project.eu/esco-skill-extractor
     ports:
-      - "3306:3306"
+      - "5003:3306"
     volumes:
       - ./sql_init:/docker-entrypoint-initdb.d
+      - curriculum-skills_mysql_data:/var/lib/mysql
 
   fastapi-service:
     depends_on:
-      - db
-    container_name: ${APP_NAME}
+      - mysql-curriculum-skill
+    container_name: curriculum-skills
     build: .
     image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
     ports:
@@ -32,7 +33,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - UVICORN_WORKERS=1
-      - DB_HOST=db
+      - DB_HOST=mysql-curriculum-skill
       - DB_PORT=3306
       - DB_USER=root
       - DB_PASSWORD=root
@@ -45,3 +46,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+
+volumes:
+  curriculum-skills_mysql_data:
