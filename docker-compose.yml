@@ -15,6 +15,8 @@ services:
     volumes:
       - ./sql_init:/docker-entrypoint-initdb.d
       - curriculum-skills_mysql_data:/var/lib/mysql
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
 
   fastapi-service:
     depends_on:
@@ -46,6 +48,10 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
 
 volumes:
   curriculum-skills_mysql_data:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
