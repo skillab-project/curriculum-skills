@@ -14,7 +14,7 @@ services:
       - "5003:3306"
     volumes:
       - ./sql_init:/docker-entrypoint-initdb.d
-      - curriculum-skills_mysql_data:/var/lib/mysql
+      - curriculum-skills_mysql:/var/lib/mysql
     labels:
       io.portainer.accesscontrol.teams: skillab-all
 
@@ -52,6 +52,6 @@ services:
       io.portainer.accesscontrol.teams: skillab-all
 
 volumes:
-  curriculum-skills_mysql_data:
+  curriculum-skills_mysql:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
