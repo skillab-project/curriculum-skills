@@ -198,6 +198,7 @@ JOIN University u ON c.university_id = u.university_id
 
 app = FastAPI(
     title="SkillCrawl API",
+    version="1.3.0",   
     description="API for skill extraction and course search (DB + domains JSON).",
     root_path="/curriculum-skills"
 )
@@ -2932,3 +2933,4 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
