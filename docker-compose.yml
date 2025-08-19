@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   mysql-curriculum-skill:
-    image: mysql:8.0
+    build:
+      context: .
+      dockerfile: mysql/Dockerfile
     container_name: mysql-curriculum-skill
     restart: unless-stopped
     environment:
@@ -13,14 +15,19 @@ services:
     ports:
       - "5003:3306"
     volumes:
-      - ./sql_init:/docker-entrypoint-initdb.d
       - curriculum-skills_mysql:/var/lib/mysql
     labels:
       io.portainer.accesscontrol.teams: skillab-all
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   fastapi-service:
     depends_on:
-      - mysql-curriculum-skill
+      mysql-curriculum-skill:
+        condition: service_healthy
     container_name: curriculum-skills
     build: .
     image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
