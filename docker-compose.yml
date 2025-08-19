@@ -30,7 +30,7 @@ services:
         condition: service_healthy
     container_name: curriculum-skills
     build: .
-    image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:20250819
+    image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
     ports:
       - "5002:8000"
     volumes:
