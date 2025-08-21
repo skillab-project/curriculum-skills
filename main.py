@@ -198,6 +198,7 @@ JOIN University u ON c.university_id = u.university_id
 
 app = FastAPI(
     title="SkillCrawl API",
+    version="0.1.3",
     description="API for skill extraction and course search (DB + domains JSON).",
     root_path="/curriculum-skills"
 )
