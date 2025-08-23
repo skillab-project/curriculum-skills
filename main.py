@@ -12,6 +12,7 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from functools import partial
 from threading import Lock
+from cleaner import clean_file, iter_json_files
 
 try:
     import orjson as _jsonlib
@@ -232,6 +233,34 @@ class SaveLabelsRequest(BaseModel):
     university_name: str = Field(..., description="Normalized university name.")
     country: Optional[str] = Field(None, description="Country name; defaults to 'Unknown' if omitted.")
     courses: List[CourseLabels] = Field(default_factory=list, description="List of courses with label arrays.")
+
+
+class CleanRequest(BaseModel):
+    folder: str
+    backend: str = Field("openai", description="LLM backend: openai or ollama")
+    model: Optional[str] = None
+    inplace: bool = False
+    outdir: Optional[str] = None
+    dry_run: bool = False
+
+class FileSummary(BaseModel):
+    file: str
+    original_count: int
+    kept_count: int
+    removed_count: int
+    removed_examples: List[str]
+
+class CleanTotals(BaseModel):
+    files: int
+    titles_before: int
+    titles_after: int
+    removed: int
+
+class CleanResponse(BaseModel):
+    totals: CleanTotals
+    summaries: List[FileSummary]
+    output_dir: Optional[str] = None
+
 
 class SaveJSONRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary JSON to store (must contain 'university_name' unless normalize_university=true).")
@@ -2054,7 +2083,46 @@ def save_json_to_db(req: SaveJSONRequest, background_tasks: BackgroundTasks):
         "queued_courses": len((payload or {}).get("courses", []))
     }
 
+@app.post("/clean-degrees", response_model=CleanResponse, tags=["Cleaning"])
+def clean_degrees(req: CleanRequest):
+    folder = os.path.abspath(req.folder)
+    if not os.path.isdir(folder):
+        raise HTTPException(status_code=400, detail=f"Folder not found: {folder}")
 
+    backend = req.backend
+    model = req.model or ("gpt-4o-mini" if backend == "openai" else "llama3.1")
+
+    if not req.inplace:
+        outdir = req.outdir or os.path.join(folder, "_cleaned")
+        os.makedirs(outdir, exist_ok=True)
+    else:
+        outdir = None
+
+    files = iter_json_files(folder)
+    if not files:
+        return CleanResponse(
+            totals=CleanTotals(files=0, titles_before=0, titles_after=0, removed=0),
+            summaries=[],
+            output_dir=outdir,
+        )
+
+    totals = {"files": 0, "titles_before": 0, "titles_after": 0, "removed": 0}
+    summaries: List[FileSummary] = []
+
+    for in_path in files:
+        out_path = in_path if req.inplace else os.path.join(outdir, os.path.basename(in_path))
+        summary = clean_file(in_path, out_path, backend=backend, model=model, dry_run=req.dry_run)
+        totals["files"] += 1
+        totals["titles_before"] += summary["original_count"]
+        totals["titles_after"] += summary["kept_count"]
+        totals["removed"] += summary["removed_count"]
+        summaries.append(FileSummary(**summary))
+
+    return CleanResponse(
+        totals=CleanTotals(**totals),
+        summaries=summaries,
+        output_dir=outdir,
+    )
 
 
 @app.get("/descriptive/location", response_model=List[CountryUniversities], tags=["Descriptive"], summary="Universities per Country from DB")
@@ -2933,5 +3001,6 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
