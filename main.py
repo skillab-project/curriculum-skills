@@ -236,12 +236,51 @@ class SaveLabelsRequest(BaseModel):
 
 
 class CleanRequest(BaseModel):
-    folder: str
+    folder: str = Field(..., description="Folder containing JSON files with degree_titles")
     backend: str = Field("openai", description="LLM backend: openai or ollama")
-    model: Optional[str] = None
-    inplace: bool = False
-    outdir: Optional[str] = None
-    dry_run: bool = False
+    model: Optional[str] = Field(None, description="Model name (default: gpt-4o-mini for OpenAI, llama3.1 for Ollama)")
+    inplace: bool = Field(False, description="Overwrite files in-place")
+    outdir: Optional[str] = Field(None, description="Output directory if not inplace (default: <folder>/_cleaned)")
+    dry_run: bool = Field(False, description="Run without writing files")
+
+    class Config:
+        schema_extra = {
+            "examples": {
+                "basic": {
+                    "summary": "Write cleaned JSONs into <folder>/_cleaned",
+                    "description": "Uses OpenAI gpt-4o-mini by default.",
+                    "value": {
+                        "folder": "crawler_json",
+                        "backend": "openai",
+                        "model": "gpt-4o-mini",
+                        "inplace": False,
+                        "outdir": None,
+                        "dry_run": False
+                    }
+                },
+                "inplace": {
+                    "summary": "Overwrite files in-place",
+                    "description": "Uses Ollama llama3.1 and writes directly into the source folder.",
+                    "value": {
+                        "folder": "crawler_json",
+                        "backend": "ollama",
+                        "model": "llama3.1",
+                        "inplace": True,
+                        "dry_run": False
+                    }
+                },
+                "dry-run": {
+                    "summary": "Preview cleaning without saving",
+                    "description": "Runs in dry-run mode, only returns summary counts.",
+                    "value": {
+                        "folder": "crawler_json",
+                        "backend": "openai",
+                        "inplace": False,
+                        "dry_run": True
+                    }
+                }
+            }
+        }
 
 class FileSummary(BaseModel):
     file: str
@@ -3001,6 +3040,7 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
