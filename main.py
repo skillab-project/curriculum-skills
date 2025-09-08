@@ -2335,7 +2335,9 @@ def _calc_occupations_task(task_id: str,
 @app.get("/theme_search", tags=["Queries"])
 def theme_search(
     theme: str = Query(..., description="Thematic keyword, e.g. 'biology' or 'computer science'"),
-    threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)")
+    threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)"),
+    include_skills: bool = Query(True, description="Include skills for each matched course"),
+    skills_limit: int = Query(0, ge=0, description="Max skills per course (0 = no limit)")
 ):
     """
     Fuzzy semantic search based on:
@@ -2344,12 +2346,12 @@ def theme_search(
       - skill names
       - occupation labels / parent_label / top_sector (linked to each skill)
 
-    Returns a flat list of matches and a grouping by university.
+    Returns a flat list of matches, a grouping by university, and a unique skills roll-up.
     """
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    theme_norm = theme.strip().lower()
+    theme_norm = (theme or "").strip().lower()
     if not theme_norm:
         raise HTTPException(status_code=400, detail="theme must not be empty")
 
@@ -2364,24 +2366,26 @@ def theme_search(
             o.parent_label,
             o.top_sector
         FROM CourseSkill cs
-        JOIN Skill s              ON cs.skill_id   = s.skill_id
-        LEFT JOIN SkillOccupation so ON s.skill_id   = so.skill_id
-        LEFT JOIN Occupation o    ON so.occupation_id = o.occupation_id
-        JOIN Course c             ON cs.course_id  = c.course_id
-        JOIN University u         ON c.university_id = u.university_id
-        WHERE s.skill_name IS NOT NULL AND s.skill_name != ''
+        JOIN Skill s                 ON cs.skill_id      = s.skill_id
+        LEFT JOIN SkillOccupation so ON s.skill_id       = so.skill_id
+        LEFT JOIN Occupation o       ON so.occupation_id = o.occupation_id
+        JOIN Course c                ON cs.course_id     = c.course_id
+        JOIN University u            ON c.university_id  = u.university_id
+        WHERE s.skill_name IS NOT NULL AND s.skill_name <> ''
     """
 
     try:
-        conn   = mysql.connector.connect(**DB_CONFIG)
+        conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)
         cursor.execute(sql)
         rows = cursor.fetchall()
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
-        try: cursor.close(); conn.close()
-        except Exception: pass
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
     course_map = defaultdict(lambda: {
         "university": "",
@@ -2395,8 +2399,9 @@ def theme_search(
     for r in rows:
         uni   = r["university_name"]
         title = r["lesson_name"]
-        key   = (uni, title)
-
+        if not title:
+            continue
+        key = (uni, title)
         cm = course_map[key]
         cm["university"] = uni
 
@@ -2421,7 +2426,8 @@ def theme_search(
             cm["occ_sectors"].add(r["top_sector"])
 
     flat_results = []
-    grouped      = defaultdict(list)
+    grouped = defaultdict(list)
+    unique_skills = set()
 
     for (uni, title), meta in course_map.items():
         thematic_items = [title]
@@ -2435,12 +2441,27 @@ def theme_search(
         score = fuzz.partial_ratio(theme_norm, thematic_str)
 
         if score >= threshold:
-            flat_results.append({
-                "university": uni,
-                "course": title,
-                "score": score
-            })
-            grouped[uni].append(title)
+            skills_list = sorted(meta["skills"])
+            if skills_limit and skills_limit > 0:
+                skills_list = skills_list[:skills_limit]
+
+            if include_skills:
+                flat_results.append({
+                    "university": uni,
+                    "course": title,
+                    "score": score,
+                    "skills": skills_list
+                })
+                grouped[uni].append({"course": title, "skills": skills_list})
+                for s in meta["skills"]:
+                    unique_skills.add(s)
+            else:
+                flat_results.append({
+                    "university": uni,
+                    "course": title,
+                    "score": score
+                })
+                grouped[uni].append({"course": title})
 
     flat_results.sort(key=lambda x: (-x["score"], x["university"], x["course"]))
 
@@ -2448,8 +2469,10 @@ def theme_search(
         "theme_query": theme,
         "threshold": threshold,
         "matches": flat_results,
-        "grouped_by_university": grouped
+        "grouped_by_university": grouped,
+        "unique_skills": sorted(unique_skills) if include_skills else []
     }
+
 
 
 @app.get("/exploratory/skills_location", response_model=List[SkillsByCountry], tags=["Exploratory"], summary="Skills per Country from DB")
@@ -3040,6 +3063,7 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
