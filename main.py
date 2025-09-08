@@ -2334,48 +2334,17 @@ def _calc_occupations_task(task_id: str,
 
 from typing import List, Optional, Literal
 
-@app.get("/theme_search", tags=["Queries"])
-def theme_search(
-    theme: Optional[str] = Query(None, description="Single keyword (backward compatible). Comma-separated allowed, e.g. 'ai, robotics'"),
-    themes: Optional[List[str]] = Query(None, description="Repeatable multi-keyword param, e.g. ?themes=ai&themes=robotics"),
-    logic: Literal["any", "all"] = Query("any", description="Match mode across multiple keywords"),
-    threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)"),
-    include_skills: bool = Query(True, description="Include skills for each matched course"),
-    skills_limit: int = Query(0, ge=0, description="Max skills per course (0 = no limit)")
+def _theme_search_compute(
+    keywords: List[str],
+    logic: Literal["any", "all"],
+    threshold: int,
+    include_skills: bool,
+    skills_limit: int
 ):
-    """
-    Fuzzy semantic search based on:
-      - course title
-      - degree titles
-      - skill names
-      - occupation labels / parent_label / top_sector (linked to each skill)
-
-    Supports multiple keywords via:
-      - repeated param: ?themes=ai&themes=robotics
-      - comma-separated in `theme`: ?theme=ai, robotics
-
-    Matching:
-      - logic = 'any' : keep course if max(keyword_score) >= threshold
-      - logic = 'all' : keep course if min(keyword_score) >= threshold
-
-    Returns matches (with optional skills), grouped_by_university, and unique_skills.
-    """
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    keywords: List[str] = []
-    if themes:
-        keywords.extend([t for t in themes if t and t.strip()])
-    if theme:
-        parts = [p.strip() for p in theme.split(",")]
-        keywords.extend([p for p in parts if p])
-
-    keywords = sorted(set([k.strip().lower() for k in keywords if k and k.strip()]))
-
-    if not keywords:
-        raise HTTPException(status_code=400, detail="Provide at least one keyword via ?theme=... or ?themes=...")
-
-    sql = f"""
+    sql = """
         SELECT
             u.university_name,
             c.lesson_name,
@@ -2402,10 +2371,11 @@ def theme_search(
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
-        try: cursor.close(); conn.close()
-        except Exception: pass
+        try:
+            cursor.close(); conn.close()
+        except Exception:
+            pass
 
-    from collections import defaultdict
     course_map = defaultdict(lambda: {
         "university": "",
         "degree_titles": set(),
@@ -2416,7 +2386,7 @@ def theme_search(
     })
 
     for r in rows:
-        uni   = r["university_name"]
+        uni = r["university_name"]
         title = r["lesson_name"]
         if not title:
             continue
@@ -2443,8 +2413,7 @@ def theme_search(
         if r.get("top_sector"):
             cm["occ_sectors"].add(r["top_sector"])
 
-    # Scoring helper for one course
-    def build_thematic_string(meta: dict, title: str) -> str:
+    def build_blob(meta: dict, title: str) -> str:
         items = [title]
         items += list(meta["degree_titles"])
         items += list(meta["skills"])
@@ -2458,13 +2427,13 @@ def theme_search(
     unique_skills = set()
 
     for (uni, title), meta in course_map.items():
-        blob = build_thematic_string(meta, title)
-        per_kw_scores = [fuzz.partial_ratio(k, blob) for k in keywords]
+        blob = build_blob(meta, title)
+        per_kw_scores = [fuzz.partial_ratio(k, blob) for k in keywords]  # 0..100
 
         if logic == "all":
             keep = (min(per_kw_scores) >= threshold) if per_kw_scores else False
             agg_score = min(per_kw_scores) if per_kw_scores else 0
-        else:
+        else:  # 'any'
             keep = (max(per_kw_scores) >= threshold) if per_kw_scores else False
             agg_score = max(per_kw_scores) if per_kw_scores else 0
 
@@ -2475,36 +2444,131 @@ def theme_search(
         if skills_limit and skills_limit > 0:
             skills_list = skills_list[:skills_limit]
 
+        entry = {
+            "university": uni,
+            "course": title,
+            "score": agg_score,
+            "per_keyword_scores": dict(zip(keywords, per_kw_scores))
+        }
         if include_skills:
-            flat_results.append({
-                "university": uni,
-                "course": title,
-                "score": agg_score,
-                "per_keyword_scores": dict(zip(keywords, per_kw_scores)),
-                "skills": skills_list
-            })
+            entry["skills"] = skills_list
             grouped[uni].append({"course": title, "skills": skills_list})
             for s in meta["skills"]:
                 unique_skills.add(s)
         else:
-            flat_results.append({
-                "university": uni,
-                "course": title,
-                "score": agg_score,
-                "per_keyword_scores": dict(zip(keywords, per_kw_scores))
-            })
             grouped[uni].append({"course": title})
 
-    flat_results.sort(key=lambda x: (-x["score"], x["university"], x["course"]))
+        flat_results.append(entry)
 
+    flat_results.sort(key=lambda x: (-x["score"], x["university"], x["course"]))
     return {
         "keywords": keywords,
         "logic": logic,
-        "threshold": threshold,
         "matches": flat_results,
         "grouped_by_university": grouped,
         "unique_skills": sorted(unique_skills) if include_skills else []
     }
+
+def _theme_search_job(task_id: str, params: dict):
+    task = TASKS.get(task_id, {})
+    def set_status(**kw):
+        task.update(kw)
+        TASKS[task_id] = task
+
+    try:
+        set_status(status="running", started_at=time.time())
+        keywords = []
+
+        themes = params.get("themes") or []
+        if themes:
+            keywords.extend([t for t in themes if t and t.strip()])
+
+        theme_single = params.get("theme")
+        if theme_single:
+            keywords.extend([p.strip() for p in theme_single.split(",") if p.strip()])
+
+        keywords = sorted(set([k.lower() for k in keywords if k.strip()]))
+
+        if not keywords:
+            set_status(status="failed", finished_at=time.time(), error="No keywords provided")
+            return
+
+        result = _theme_search_compute(
+            keywords=keywords,
+            logic=params.get("logic", "any"),
+            threshold=int(params.get("threshold", 70)),
+            include_skills=bool(params.get("include_skills", True)),
+            skills_limit=int(params.get("skills_limit", 0)),
+        )
+        set_status(status="succeeded", finished_at=time.time(), result=result)
+    except Exception as e:
+        set_status(status="failed", finished_at=time.time(), error=str(e))
+
+@app.get("/theme_search", tags=["Queries"])
+def theme_search(
+    background_tasks: BackgroundTasks,
+    theme: Optional[str] = Query(None, description="Single keyword (comma-separated allowed)"),
+    themes: Optional[List[str]] = Query(None, description="Repeatable multi-keyword param, e.g. ?themes=ai&themes=robotics"),
+    logic: Literal["any", "all"] = Query("any", description="Keyword combination logic"),
+    threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)"),
+    include_skills: bool = Query(True, description="Include skills for each matched course"),
+    skills_limit: int = Query(0, ge=0, description="Max skills per course (0 = unlimited)"),
+    async_mode: bool = Query(False, description="If true, run search in background and return task_id")
+):
+    """
+    Fuzzy semantic search over:
+      - course title
+      - degree titles
+      - skill names
+      - occupation labels / parent_label / top_sector
+
+    Multiple keywords:
+      - ?themes=ai&themes=robotics  (repeatable)
+      - ?theme=ai, robotics         (comma-separated)
+
+    If async_mode=true, queues a background task and returns {task_id}; 
+    otherwise runs synchronously and returns results immediately.
+    """
+    keywords: List[str] = []
+    if themes:
+        keywords.extend([t for t in themes if t and t.strip()])
+    if theme:
+        keywords.extend([p.strip() for p in theme.split(",") if p.strip()])
+
+    keywords = sorted(set([k.strip().lower() for k in keywords if k and k.strip()]))
+    if not keywords:
+        raise HTTPException(status_code=400, detail="Provide at least one keyword via ?theme=... or ?themes=...")
+
+    if async_mode:
+        task_id = str(uuid4())
+        TASKS[task_id] = {
+            "status": "queued",
+            "queued_at": time.time(),
+            "type": "theme_search",
+            "params": {
+                "theme": theme,
+                "themes": themes,
+                "logic": logic,
+                "threshold": threshold,
+                "include_skills": include_skills,
+                "skills_limit": skills_limit,
+            }
+        }
+        background_tasks.add_task(_theme_search_job, task_id, TASKS[task_id]["params"])
+        return {
+            "status": "queued",
+            "task_id": task_id,
+            "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress and results."
+        }
+
+    return _theme_search_compute(
+        keywords=keywords,
+        logic=logic,
+        threshold=threshold,
+        include_skills=include_skills,
+        skills_limit=skills_limit
+    )
+
 
 
 @app.get("/exploratory/skills_location", response_model=List[SkillsByCountry], tags=["Exploratory"], summary="Skills per Country from DB")
@@ -3095,6 +3159,7 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
