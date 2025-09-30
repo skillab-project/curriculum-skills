@@ -2564,6 +2564,161 @@ def get_university_trend_per_location_db():
         cursor.close()
         conn.close()
 
+@app.get(
+    "/university/all",
+    tags=["Queries"],
+    summary="Full snapshot for a university (metadata, courses, skills)",
+)
+def get_university_full(
+    university_name: str = Query(..., description="University name (LIKE match)"),
+    page: int = Query(1, ge=1, description="Results page (1-based)"),
+    per_page: int = Query(25, ge=1, le=100, description="Courses per page (max 100)"),
+):
+    """
+    Returns a consolidated view for a university:
+      - university metadata
+      - paginated courses
+      - per-course skills
+      - aggregated top skills
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    uni_sql = """
+        SELECT university_id, university_name, country, created_at
+        FROM University
+        WHERE university_name LIKE %s
+        ORDER BY university_name ASC
+        LIMIT 1
+    """
+
+    count_sql = """
+        SELECT COUNT(*) AS n
+        FROM Course c
+        JOIN University u ON c.university_id = u.university_id
+        WHERE u.university_name LIKE %s
+    """
+
+    courses_sql = """
+        SELECT
+            c.course_id,
+            c.lesson_name,
+            c.description,
+            c.objectives,
+            c.learning_outcomes,
+            c.course_content,
+            c.assessment,
+            c.exam,
+            c.general_competences,
+            c.educational_material
+        FROM Course c
+        JOIN University u ON c.university_id = u.university_id
+        WHERE u.university_name LIKE %s
+        ORDER BY c.lesson_name ASC, c.course_id ASC
+        LIMIT %s OFFSET %s
+    """
+
+    skills_sql = """
+        SELECT
+            c.course_id,
+            c.lesson_name,
+            s.skill_name,
+            s.skill_url,
+            s.esco_level
+        FROM Course c
+        JOIN University u  ON c.university_id = u.university_id
+        JOIN CourseSkill cs ON c.course_id = cs.course_id
+        JOIN Skill s        ON cs.skill_id = s.skill_id
+        WHERE u.university_name LIKE %s
+          AND c.course_id IN ({placeholders})
+          AND s.skill_name IS NOT NULL
+          AND s.skill_name <> ''
+    """
+
+    top_sql = f"""
+        SELECT s.skill_name
+        {JOIN_SKILL_ON_COURSE}
+        WHERE u.university_name LIKE %s
+          AND s.skill_name IS NOT NULL
+          AND s.skill_name <> ''
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+
+        cur.execute(uni_sql, (f"%{university_name}%",))
+        uni = cur.fetchone()
+        if not uni:
+            raise HTTPException(status_code=404, detail=f"University not found: '{university_name}'")
+
+        cur.execute(count_sql, (f"%{university_name}%",))
+        total_courses = int((cur.fetchone() or {}).get("n") or 0)
+        total_pages = (total_courses + per_page - 1) // per_page if total_courses else 0
+        if total_pages and page > total_pages:
+            page = total_pages
+        offset = (page - 1) * per_page
+
+        cur.execute(courses_sql, (f"%{university_name}%", per_page, offset))
+        courses = cur.fetchall() or []
+        course_ids = [c["course_id"] for c in courses]
+
+        skills_by_course = {cid: [] for cid in course_ids}
+        unique_skills = set()
+        total_skill_links = 0
+        if course_ids:
+            ph = ",".join(["%s"] * len(course_ids))
+            cur.execute(skills_sql.format(placeholders=ph), (f"%{university_name}%", *course_ids))
+            for r in cur.fetchall() or []:
+                cid = r["course_id"]
+                nm = r.get("skill_name")
+                if nm:
+                    unique_skills.add(nm)
+                    total_skill_links += 1
+                skills_by_course.setdefault(cid, []).append({
+                    "skill_name": r.get("skill_name"),
+                    "skill_url": r.get("skill_url"),
+                    "esco_level": (str(r.get("esco_level")).strip() if r.get("esco_level") is not None else None),
+                })
+
+        for c in courses:
+            c["skills"] = skills_by_course.get(c["course_id"], [])
+
+        cur.execute(top_sql, (f"%{university_name}%",))
+        names = [row["skill_name"] for row in (cur.fetchall() or []) if row.get("skill_name")]
+        top_counter = Counter(names)
+        top_skills = [{"skill": k, "frequency": v} for k, v in top_counter.most_common(50)]
+
+        return {
+            "university": {
+                "university_id": uni["university_id"],
+                "university_name": uni["university_name"],
+                "country": uni.get("country"),
+                "created_at": uni.get("created_at"),
+            },
+            "counts": {
+                "total_courses": total_courses,
+                "unique_skills": len(unique_skills),
+                "total_skill_links": total_skill_links,
+            },
+            "top_skills": top_skills,
+            "page": page,
+            "per_page": per_page,
+            "total_courses": total_courses,
+            "total_pages": total_pages,
+            "courses": courses,
+        }
+
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+
 @app.get("/cluster/universities/{k}", response_model=List[ClusterResult], tags=["Clustering"], summary="University Clustering by Skills from DB")
 def cluster_universities_db(k: int):
     if not is_database_connected(DB_CONFIG):
@@ -3100,6 +3255,7 @@ def db_ping():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
