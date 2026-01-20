@@ -82,7 +82,7 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from datetime import datetime
 
-
+from recommendation_system.api.router import router as recommender_router
 
 logger = logging.getLogger("db_saver")
 
@@ -202,6 +202,12 @@ app = FastAPI(
     version="0.1.3",
     description="API for skill extraction and course search (DB + domains JSON).",
     root_path="/curriculum-skills"
+)
+
+app.include_router(
+    recommender_router,
+    prefix="/recommendation",
+    tags=["Recommendation System"]
 )
 
 class DebugPDFRequest(BaseModel):
