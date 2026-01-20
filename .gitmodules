@@ -1,0 +1,3 @@
+[submodule "recommendation_system"]
+	path = recommendation_system
+	url = https://github.com/stefaniaap/recommendation-system.git
