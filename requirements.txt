@@ -14,3 +14,10 @@ python-dotenv>=1.0
 gradio_client>=0.15
 trafilatura>=1.8
 playwright>=1.45
+
+numpy
+sqlalchemy
+pymysql
+pandas
+jupyter
+matplotlib

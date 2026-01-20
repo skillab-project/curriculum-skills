@@ -76,13 +76,16 @@ from output import (
     _find_uni_by_name,
     _load_universities
 )
-from config import DB_CONFIG
+from config import DB_CONFIG 
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from datetime import datetime
 
-from recommendation_system.api.router import router as recommender_router
+from recommendation_system.backend.routers.electives import router as electives_router
+from recommendation_system.backend.routers.filters import router as filters_router
+from recommendation_system.backend.routers.recommendations import router as recommendations_router
+
 
 logger = logging.getLogger("db_saver")
 
@@ -205,10 +208,23 @@ app = FastAPI(
 )
 
 app.include_router(
-    recommender_router,
-    prefix="/recommendation",
-    tags=["Recommendation System"]
+    electives_router,
+    prefix="/recommendation/electives",
+    tags=["Recommendation"]
 )
+
+app.include_router(
+    filters_router,
+    prefix="/recommendation/filters",
+    tags=["Recommendation"]
+)
+
+app.include_router(
+    recommendations_router,
+    prefix="/recommendation",
+    tags=["Recommendation"]
+)
+
 
 class DebugPDFRequest(BaseModel):
     pdf_name: str
