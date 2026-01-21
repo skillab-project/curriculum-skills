@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edu Recommender - Role Selection</title>
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        /* ---------------------------
+           CSS Variables / Theme Colors
+        --------------------------- */
+        :root {
+            --primary-color: #6a9bd8;
+            /* Pastel Blue */
+            --analyst-color: #79c792;
+            /* Pastel Green */
+            --secondary-color: #6c757d;
+            /* Gray text */
+            --background-color: #f4f6f9;
+            /* Page background */
+            --sidebar-color: #2c3e50;
+            /* Dark sidebar */
+            --card-background: #ffffff;
+            /* White card background */
+            --border-radius: 8px;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --active-sidebar-color: rgba(255, 255, 255, 0.1);
+            /* Active sidebar background */
+            --active-sidebar-text: white;
+            /* Active sidebar text color */
+        }
+
+        /* Base body styling */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* ---------------------------
+           SIDEBAR STYLING
+        --------------------------- */
+        .sidebar {
+            width: 250px;
+            background-color: var(--sidebar-color);
+            color: #ecf0f1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Logo section at the top of sidebar */
+        .logo-section {
+            padding-bottom: 25px;
+            margin-bottom: 25px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            width: 100%;
+        }
+
+        .logo-section a {
+            text-decoration: none;
+            /* Remove underline */
+        }
+
+        .logo-placeholder {
+            font-size: 2em;
+            font-weight: 700;
+            color: var(--primary-color);
+            text-align: center;
+        }
+
+        .logo-placeholder span {
+            color: #ecf0f1;
+        }
+
+        /* Navigation links in sidebar */
+        .sidebar nav {
+            width: 100%;
+        }
+
+        .sidebar nav a {
+            color: #ecf0f1;
+            text-decoration: none;
+            padding: 10px 15px;
+            display: block;
+            margin-bottom: 5px;
+            border-radius: 4px;
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        /* Hover effect for sidebar links */
+        .sidebar nav a:hover {
+            background-color: var(--active-sidebar-color);
+            color: var(--primary-color);
+        }
+
+        /* Active landing page link styling */
+        .sidebar nav a.active-landing {
+            background-color: var(--active-sidebar-color);
+            color: var(--active-sidebar-text);
+            font-weight: 600;
+        }
+
+        /* Submenu items styling */
+        .submenu-item {
+            padding-left: 35px !important;
+            font-size: 0.9em !important;
+            margin-top: -5px !important;
+        }
+
+        .submenu-item.active {
+            color: var(--analyst-light-color);
+        }
+
+        /* ---------------------------
+           MAIN CONTENT STYLING
+        --------------------------- */
+        .main-content {
+            flex-grow: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        /* Role selection container (center card) */
+        .role-selection-container {
+            width: 100%;
+            max-width: 900px;
+            padding: 40px;
+            background: var(--card-background);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            text-align: center;
+        }
+
+        .role-selection-container h1 {
+            color: #343a40;
+            font-size: 2.8em;
+            margin-bottom: 10px;
+        }
+
+        .role-selection-container p {
+            color: var(--secondary-color);
+            font-size: 1.1em;
+            margin-bottom: 40px;
+        }
+
+        /* Container for role cards */
+        .role-cards {
+            display: flex;
+            gap: 30px;
+            justify-content: center;
+        }
+
+        /* Individual role card styling */
+        .role-card {
+            flex: 1;
+            padding: 30px 20px;
+            border-radius: var(--border-radius);
+            transition: transform 0.3s, box-shadow 0.3s;
+            border: 1px solid #dee2e6;
+            text-decoration: none;
+            color: inherit;
+            background-color: #f8f9fa;
+        }
+
+        /* Hover effect for role cards */
+        .role-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(106, 155, 216, 0.3);
+        }
+
+        /* Role icon styling */
+        .role-card i {
+            font-size: 3em;
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        .role-card h2 {
+            font-size: 1.6em;
+            margin-top: 15px;
+        }
+
+        .disabled-link {
+            pointer-events: none;
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+
+        .role-card p {
+            font-size: 0.95em;
+            color: #495057;
+        }
+
+        .sidebar-section-title {
+            margin: 25px 0 8px 20px;
+            font-size: 0.78em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+
+
+        /* Student card (blue accent) */
+        #student-card {
+            border-left: 5px solid var(--primary-color);
+        }
+
+        #student-card i {
+            color: var(--primary-color);
+        }
+
+        #student-card h2 {
+            color: var(--primary-color);
+        }
+
+        /* University / Analyst card (green accent) */
+        #university-card {
+            border-left: 5px solid var(--analyst-color);
+        }
+
+        #university-card i {
+            color: var(--analyst-color);
+        }
+
+        #university-card h2 {
+            color: var(--analyst-color);
+        }
+
+
+        /* ---------------------------
+   SIDEBAR: Ισομερή απόσταση Home ↔ Analyst ↔ Student
+--------------------------- */
+        .sidebar nav a {
+            display: block;
+            padding: 12px 15px;
+            /* αυξημένο padding για πιο ομοιόμορφη απόσταση */
+            margin-bottom: 12px;
+            /* ίδιο κενό μεταξύ links */
+        }
+
+        /* Αν θέλουμε πιο ακριβή απόσταση για συγκεκριμένα links */
+        .sidebar nav a.active-landing {
+            /* Home */
+            margin-bottom: 12px;
+        }
+
+        .sidebar nav a[href="university_analysis.html"] {
+            /* Analyst */
+            margin-bottom: 12px;
+        }
+
+        .sidebar nav a[href="student_analysis.html"] {
+            /* Student */
+            margin-top: 20px;
+            /* διαχωρισμός από υπομενού Degree Development */
+        }
+
+        /* ---------------------------
+   ROLE CARDS: Analyst πιο κοντά στο Degree Development
+--------------------------- */
+        .role-cards {
+            display: flex;
+            gap: 40px;
+            /* απόσταση μεταξύ των καρτών */
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+        /* Φέρνουμε Analyst πιο κοντά */
+        #university-card {
+            order: 1;
+            /* εμφανίζεται πρώτος αν θέλουμε πιο κοντά στην αρχή */
+            margin-right: -10px;
+            /* μικρή αρνητική τιμή για να φανεί πιο κοντά */
+        }
+
+        /* Student κάρτα */
+        #student-card {
+            order: 2;
+            margin-left: 10px;
+            /* μικρή απόσταση από Analyst */
+        }
+
+        /* Responsive tweak αν χρειαστεί */
+        @media (max-width: 768px) {
+            .role-cards {
+                flex-direction: column;
+                gap: 25px;
+            }
+
+            #university-card,
+            #student-card {
+                order: 0;
+                margin: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- ---------------------------
+         SIDEBAR NAVIGATION
+    --------------------------- -->
+    <div class="sidebar">
+        <!-- Logo Section -->
+        <div class="logo-section">
+            <a href="landing_page.html">
+                <div class="logo-placeholder">
+                    <i class="fas fa-graduation-cap"></i> Edu <span>Recommender</span>
+                </div>
+            </a>
+        </div>
+
+        <!-- Navigation Links -->
+        <nav>
+
+            <!-- Home -->
+            <a href="landing_page.html" class="active-landing">
+                <i class="fas fa-home"></i> Home
+            </a>
+
+            <!-- Analyst Role -->
+            <a href="university_analysis.html">
+                <i class="fas fa-chart-line"></i> Analyst Role
+            </a>
+
+            <!-- Degree Development Section -->
+            <div class="sidebar-section-title">Degree Development</div>
+
+            <a href="new_degree_purposals.html" class="submenu-item disabled-link">
+                <i class="fas fa-lightbulb"></i> New Degree Proposals
+            </a>
+
+            <a href="recommended_degree_plan.html" class="submenu-item disabled-link">
+                <i class="fas fa-graduation-cap"></i> Recommended Degree Plan
+            </a>
+
+            <!-- Curriculum Tools Section -->
+            <div class="sidebar-section-title">Curriculum Tools</div>
+
+            <a href="curricumum_enhancement.html" class="submenu-item disabled-link">
+                <i class="fas fa-layer-group"></i> Curriculum Enhancement
+            </a>
+
+            <!-- Student Role -->
+            <a href="student_analysis.html" style="margin-top: 20px;">
+                <i class="fas fa-user-graduate"></i> Student Role
+            </a>
+
+            <a href="personalized_recommendations.html" class="submenu-item">
+                <i class="fas fa-compass"></i> Personalized Recommendations
+            </a>
+
+            <a href="degree_based_recommendations.html" class="submenu-item">
+                <i class="fas fa-brain"></i> Degree-Based Recommendations
+            </a>
+
+        </nav>
+
+
+    </div>
+
+    <!-- ---------------------------
+         MAIN CONTENT: ROLE SELECTION CARDS
+    --------------------------- -->
+    <div class="main-content">
+        <div class="role-selection-container">
+            <!-- Page heading -->
+            <h1>Welcome to Edu Recommender</h1>
+            <p>Select your role to access the relevant recommendation and analysis systems:</p>
+
+            <!-- Cards for role selection -->
+            <div class="role-cards">
+                <!-- Student / User role card -->
+                <a href="student_analysis.html" id="student-card" class="role-card">
+                    <i class="fas fa-user-graduate"></i>
+                    <h2>Student / User</h2>
+                    <p>Find study programs or courses based on skills, degree type, and language criteria.</p>
+                    <p style="font-weight: bold;">Proceed to Search Interface</p>
+                </a>
+
+                <!-- University / Analyst role card -->
+                <a href="university_analysis.html" id="university-card" class="role-card">
+                    <i class="fas fa-university"></i>
+                    <h2>University / Analyst</h2>
+                    <p>Analyze an institution's metrics and receive recommendations for new degrees or courses.</p>
+                    <p style="font-weight: bold;">Proceed to Analysis Dashboard</p>
+                </a>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

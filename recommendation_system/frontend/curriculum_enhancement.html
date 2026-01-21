@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edu Recommender - Course Recommendations with Skills Heatmap</title>
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <!-- Chart.js for Heatmap / Charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        /* ---------------------------------------------------------
+           Global CSS Variables for Theme Colors and Shared Styles
+        --------------------------------------------------------- */
+        :root {
+            --primary-color: #6a9bd8;
+            --analyst-color: #79c792;
+            --secondary-color: #6c757d;
+            --background-color: #f4f6f9;
+            --sidebar-color: #2c3e50;
+            --card-background: #ffffff;
+            --border-radius: 8px;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --active-sidebar-color: rgba(255, 255, 255, 0.1);
+            --active-sidebar-text: white;
+        }
+
+        /* ---------------------------------------------------------
+           Global Body & Layout Styling
+        --------------------------------------------------------- */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            margin: 0;
+            display: flex;
+            min-height: 100vh;
+            color: #333;
+        }
+
+        /* ---------------------------------------------------------
+           Sidebar Navigation
+        --------------------------------------------------------- */
+        .sidebar {
+            flex: 0 0 250px;
+            /* ΠΡΑΓΜΑΤΙΚΑ σταθερό πλάτος */
+            width: 250px;
+            background-color: var(--sidebar-color);
+            color: #ecf0f1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+
+
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .disabled-link {
+            pointer-events: none;
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+
+        /* Back button styling used to return to previous menu */
+        .back-button {
+            color: #79c792;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s ease;
+        }
+
+        .back-button:hover {
+            color: #6ab785;
+        }
+
+        /* Sidebar Logo Section */
+        .logo-section {
+            padding-bottom: 25px;
+            margin-bottom: 25px;
+            width: 100%;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .logo-section a {
+            text-decoration: none;
+        }
+
+        /* Logo placeholder style */
+        .logo-placeholder {
+            font-size: 2em;
+            font-weight: 700;
+            text-align: center;
+            color: var(--primary-color);
+        }
+
+        .logo-placeholder span {
+            color: #ecf0f1;
+        }
+
+        /* Navigation links container */
+        .sidebar nav {
+            width: 100%;
+        }
+
+        /* Standard navigation links */
+        .sidebar nav a {
+            color: #ecf0f1;
+            text-decoration: none;
+            padding: 10px 15px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s, color 0.2s;
+            width: 100%;
+            box-sizing: border-box;
+            display: block;
+        }
+
+
+
+        /* Hover effects for navigation links */
+        .sidebar nav a:hover {
+            background-color: var(--active-sidebar-color);
+            color: var(--primary-color);
+        }
+
+        /* Highlight for the active submenu page */
+        .sidebar nav a.active-landing {
+            background-color: var(--active-sidebar-color);
+            color: var(--active-sidebar-text);
+            font-weight: 600;
+        }
+
+        /* Indentation for submenu links */
+        .submenu-item {
+            padding-left: 35px !important;
+            font-size: 0.9em !important;
+            margin-top: -5px !important;
+        }
+
+        /* ---------------------------------------------------------
+           Main Page Layout
+        --------------------------------------------------------- */
+        .main-content {
+            flex: 1;
+            padding: 30px;
+        }
+
+
+        .container {
+            max-width: 950px;
+            margin: 0 auto;
+            background-color: var(--card-background);
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+        }
+
+        /* ---------------------------------------------------------
+           Section Headers
+        --------------------------------------------------------- */
+        .header-section {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        #courses-header {
+            text-align: center;
+            font-size: 1.1em;
+            color: #6c757d;
+            margin-bottom: 5px;
+        }
+
+        #courses-title {
+            text-align: center;
+            color: #79c792;
+            font-size: 1.8em;
+            font-weight: 600;
+            border-bottom: 3px solid #79c792;
+            padding-bottom: 10px;
+            margin-bottom: 25px;
+        }
+
+
+        /* Degree program dropdown menu */
+        #degree-dropdown {
+            display: block;
+            width: 100%;
+            max-width: 400px;
+            padding: 10px;
+            margin: 15px auto;
+            font-size: 1em;
+        }
+
+        /* ---------------------------------------------------------
+           Course Recommendation Cards
+        --------------------------------------------------------- */
+        #course-recommendation-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .course-card {
+            padding: 20px;
+            margin-bottom: 18px;
+            list-style: none;
+            background-color: #fff;
+            border-radius: 6px;
+            border-left: 6px solid;
+            transition: transform 0.2s;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        .course-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Card header section (course name + score badge) */
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .course-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #343a40;
+            margin: 0;
+        }
+
+        .score-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            color: white;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        /* Grid for displaying course meta information */
+        .info-grid {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+
+        .info-item h6 {
+            margin-bottom: 5px;
+            padding-left: 8px;
+            font-size: 0.9em;
+            font-weight: 700;
+            color: #495057;
+            border-left: 3px solid #007bff;
+        }
+
+        .info-item p {
+            font-size: 0.9em;
+            color: #6c757d;
+            line-height: 1.5;
+        }
+
+        /* Section for expanded course info */
+        .info-section {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f0f8ff;
+            border-radius: 8px;
+            border: 1px solid #cce5ff;
+        }
+
+        /* Loading spinner text */
+        #loading-spinner p {
+            color: #007bff;
+            font-size: 1.1em;
+            font-weight: 500;
+        }
+
+        /* ---------------------------------------------------------
+           Heatmap Chart Area
+        --------------------------------------------------------- */
+        .chart-container {
+            width: 100%;
+            max-width: 900px;
+            margin: 20px auto;
+        }
+
+        .chart-title {
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #007bff;
+            margin-top: 40px;
+            margin-bottom: 10px;
+        }
+
+        .sidebar-section-title {
+            margin: 25px 0 8px 20px;
+            font-size: 0.78em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        /* ---------------------------
+   SIDEBAR: Ισομερή απόσταση Home ↔ Analyst ↔ Student
+--------------------------- */
+        .sidebar nav a {
+            display: block;
+            padding: 12px 15px;
+            /* αυξημένο padding για πιο ομοιόμορφη απόσταση */
+            margin-bottom: 12px;
+            /* ίδιο κενό μεταξύ links */
+        }
+
+
+        /* Αν θέλουμε πιο ακριβή απόσταση για συγκεκριμένα links */
+        .sidebar nav a.active-landing {
+            /* Home */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="university_analysis.html"] {
+            /* Analyst */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="student_analysis.html"] {
+            /* Student */
+            margin-top: 20px;
+            /* διαχωρισμός από υπομενού Degree Development */
+        }
+
+
+        /* ---------------------------
+   ROLE CARDS: Analyst πιο κοντά στο Degree Development
+--------------------------- */
+        .role-cards {
+            display: flex;
+            gap: 40px;
+            /* απόσταση μεταξύ των καρτών */
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+
+        /* Φέρνουμε Analyst πιο κοντά */
+        #university-card {
+            order: 1;
+            /* εμφανίζεται πρώτος αν θέλουμε πιο κοντά στην αρχή */
+            margin-right: -10px;
+            /* μικρή αρνητική τιμή για να φανεί πιο κοντά */
+        }
+
+
+        /* Student κάρτα */
+        #student-card {
+            order: 2;
+            margin-left: 10px;
+            /* μικρή απόσταση από Analyst */
+        }
+
+
+        /* Responsive tweak αν χρειαστεί */
+        @media (max-width: 768px) {
+            .role-cards {
+                flex-direction: column;
+                gap: 25px;
+            }
+
+            #university-card,
+            #student-card {
+                order: 0;
+                margin: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ---------------------------------------------------------
+         Left Sidebar Navigation (Fixed)
+    --------------------------------------------------------- -->
+    <div class="sidebar">
+
+        <!-- Logo Section -->
+        <div class="logo-section">
+            <a href="landing_page.html">
+                <div class="logo-placeholder">
+                    <i class="fas fa-graduation-cap"></i> Edu <span>Recommender</span>
+                </div>
+            </a>
+        </div>
+
+        <!-- Navigation Links -->
+        <nav>
+            <!-- Analyst Role Section -->
+            <a href="landing_page.html"><i class="fas fa-home"></i> Home</a>
+            <a href="university_analysis.html"><i class="fas fa-chart-line disabled-link"></i> Analyst Role</a>
+            <div class="sidebar-section-title">Degree Development</div>
+            <a href="new_degree_purposals.html" class="submenu-item disabled-link"><i class="fas fa-lightbulb"></i> New
+                Degree
+                Proposals</a>
+            <a href="recommended_degree_plan.html" class="submenu-item disabled-link"><i
+                    class="fas fa-graduation-cap"></i>
+                Recommended Degree Plan</a>
+            <div class="sidebar-section-title">Curriculum Tools</div>
+            <a href="curricumum_enhancement.html" class="submenu-item active-landing">
+                <i class="fas fa-layer-group"></i> Curriculum Enhancement
+            </a>
+
+            <!-- Student Role Section -->
+            <a href="student_analysis.html" style="margin-top: 20px;">
+                <i class="fas fa-user-graduate"></i> Student Role
+            </a>
+            <a href="personalized_recommendations.html" class="submenu-item">
+                <i class="fas fa-compass"></i> Personalized Recommendations
+            </a>
+            <a href="degree_based_recommendations.html" class="submenu-item">
+                <i class="fas fa-brain"></i> Degree-Based Recommendations
+            </a>
+        </nav>
+    </div>
+
+    <!-- ---------------------------------------------------------
+         Main Page Content Area
+    --------------------------------------------------------- -->
+    <div class="main-content">
+        <div class="container">
+
+            <!-- Back Navigation Button -->
+            <a href="javascript:history.back()" class="back-button">⬅ Back to Degree Recommendations</a>
+
+            <!-- University Header -->
+            <div class="header-section">
+                <p id="courses-header">Loading University...</p>
+            </div>
+
+            <!-- Degree Program Selection Dropdown -->
+            <select id="degree-dropdown">
+                <option value="">Select Degree Program</option>
+            </select>
+
+            <!-- Courses Title -->
+            <h2 id="courses-title">Loading Course Recommendations...</h2>
+
+            <!-- Loading Spinner -->
+            <div id="loading-spinner" style="text-align: center; margin: 50px 0;">
+                <p>Loading data...</p>
+            </div>
+
+            <!-- Dynamic Course Recommendation Cards -->
+            <ul id="course-recommendation-list"></ul>
+
+            <!-- Skills Heatmap Section -->
+            <div id="heatmap-section">
+                <div class="chart-title"> Skills Heatmap per Course</div>
+                <div class="chart-container">
+                    <canvas id="skillsHeatmapChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- External JavaScript controlling API calls and UI updates -->
+    <script src="curriculum_enhancement.js"></script>
+</body>
+
+</html>

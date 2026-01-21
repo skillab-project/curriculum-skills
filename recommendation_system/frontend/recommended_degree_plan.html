@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edu Recommender - Course Recommendations with Skills Heatmap</title>
+
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        /* =====================================================
+           CSS Variables (colors, shadows, radius)
+           ===================================================== */
+        :root {
+            --primary-color: #6a9bd8;
+            --analyst-color: #79c792;
+            --secondary-color: #6c757d;
+            --background-color: #f4f6f9;
+            --sidebar-color: #2c3e50;
+            --card-background: #ffffff;
+            --border-radius: 12px;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --active-sidebar-color: rgba(255, 255, 255, 0.1);
+            --active-sidebar-text: white;
+        }
+
+        /* =====================================================
+           General body styling
+           ===================================================== */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            min-height: 100vh;
+            color: #333;
+        }
+
+        /* Card title style */
+        .card-title {
+            color: var(--primary-color);
+            font-size: 1.2em;
+            font-weight: 600;
+        }
+
+        /* =====================================================
+           Sidebar styling
+           ===================================================== */
+        .sidebar {
+            width: 250px;
+            background-color: var(--sidebar-color);
+            color: #ecf0f1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+            position: fixed;
+            height: 100%;
+        }
+
+
+
+        /* Back button styling */
+        .back-button {
+            color: var(--analyst-color);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s ease;
+        }
+
+        .back-button:hover {
+            color: #6ab785;
+        }
+
+        /* Logo section styling */
+        .logo-section {
+            padding-bottom: 25px;
+            margin-bottom: 25px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            width: 100%;
+        }
+
+        .logo-section a {
+            text-decoration: none;
+        }
+
+        .logo-placeholder {
+            font-size: 2em;
+            font-weight: 700;
+            color: var(--primary-color);
+            text-align: center;
+        }
+
+        .logo-placeholder span {
+            color: #ecf0f1;
+        }
+
+        /* Sidebar navigation links */
+        .sidebar nav {
+            width: 100%;
+        }
+
+        .sidebar nav a {
+
+            color: #ecf0f1;
+
+            text-decoration: none;
+
+            padding: 11px 15px;
+
+            /* ίδιο ύψος όπως στον πρώτο κώδικα */
+
+            display: block;
+
+            margin-bottom: 12px;
+
+            /* ίδιο κενό μεταξύ links */
+
+            border-radius: 4px;
+
+            transition: background-color 0.2s, color 0.2s;
+
+
+
+        }
+
+
+
+        /* Hover effect for sidebar links */
+        .sidebar nav a:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: var(--primary-color);
+        }
+
+
+        /* Active link styling */
+        .sidebar nav a.active-student {
+            background-color: var(--active-sidebar-color);
+            color: var(--active-sidebar-text);
+            font-weight: 600;
+        }
+
+        /* Submenu item indentation */
+        .submenu-item {
+            padding-left: 35px !important;
+            font-size: 0.9em !important;
+            margin-top: -5px !important;
+        }
+
+        /* =====================================================
+           Main content styling
+           ===================================================== */
+        .main-content {
+            margin-left: 250px;
+            flex-grow: 1;
+            padding: 30px;
+        }
+
+        /* Container for all main content */
+        .container {
+            max-width: 950px;
+            margin: 0 auto;
+            background-color: var(--card-background);
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+        }
+
+        /* Header section for course info */
+        .header-section {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        /* Subheading showing loading info */
+        #courses-header {
+            font-size: 1.1em;
+            color: #6c757d;
+            margin-bottom: 5px;
+            text-align: center;
+        }
+
+        /* Main title for course recommendations */
+        #courses-title {
+            color: var(--analyst-color);
+            margin-bottom: 25px;
+            border-bottom: 3px solid var(--analyst-color);
+            padding-bottom: 10px;
+            font-size: 1.8em;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        /* List container for course recommendations */
+        #course-recommendation-list {
+            padding: 0;
+            list-style: none;
+        }
+
+        /* Individual course card */
+        .course-card {
+            list-style: none;
+            margin-bottom: 18px;
+            padding: 20px;
+            border-left: 6px solid;
+            background-color: #fff;
+            border-radius: 6px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+        }
+
+        .course-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Card header with course name and score badge */
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .course-name {
+            color: #6ea8ff;
+            font-weight: 600;
+        }
+
+        /* Badge for score */
+        .score-badge {
+            padding: 5px 12px;
+            color: white;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        /* Grid layout for additional course info */
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .info-item h6 {
+            color: #495057;
+            font-weight: 700;
+            margin-bottom: 5px;
+            border-left: 3px solid #007bff;
+            padding-left: 8px;
+            font-size: 0.9em;
+        }
+
+        .info-item p {
+            font-size: 0.9em;
+            color: #6c757d;
+            line-height: 1.5;
+        }
+
+        /* Section for skill-related info */
+        .info-section {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f0f8ff;
+            border-radius: 8px;
+            border: 1px solid #cce5ff;
+        }
+
+        /* Loading spinner styling */
+        #loading-spinner p {
+            color: #007bff;
+            font-size: 1.1em;
+            font-weight: 500;
+        }
+
+        /* Skills heatmap chart container */
+        .chart-container {
+            width: 100%;
+            max-width: 900px;
+            margin: 20px auto;
+        }
+
+        .chart-title {
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #007bff;
+            margin-top: 40px;
+            margin-bottom: 10px;
+        }
+
+        .disabled-link {
+            pointer-events: none;
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .sidebar-section-title {
+            margin: 20px 0 5px 20px;
+            font-size: 0.78em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        /* ---------------------------
+   SIDEBAR: Ισομερή απόσταση Home ↔ Analyst ↔ Student
+--------------------------- */
+
+
+
+
+
+        /* Αν θέλουμε πιο ακριβή απόσταση για συγκεκριμένα links */
+        .sidebar nav a.active-landing {
+            margin-bottom: 12px;
+        }
+
+        .sidebar nav a[href="university_analysis.html"] {
+            /* Analyst */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="student_analysis.html"] {
+            /* Student */
+            margin-top: 20px;
+            /* διαχωρισμός από υπομενού Degree Development */
+        }
+
+
+        /* ---------------------------
+   ROLE CARDS: Analyst πιο κοντά στο Degree Development
+--------------------------- */
+        .role-cards {
+            display: flex;
+            gap: 40px;
+            /* απόσταση μεταξύ των καρτών */
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+
+        /* Φέρνουμε Analyst πιο κοντά */
+        #university-card {
+            order: 1;
+            /* εμφανίζεται πρώτος αν θέλουμε πιο κοντά στην αρχή */
+            margin-right: -10px;
+            /* μικρή αρνητική τιμή για να φανεί πιο κοντά */
+        }
+
+
+        /* Student κάρτα */
+        #student-card {
+            order: 2;
+            margin-left: 10px;
+            /* μικρή απόσταση από Analyst */
+        }
+
+
+        /* Responsive tweak αν χρειαστεί */
+        @media (max-width: 768px) {
+            .role-cards {
+                flex-direction: column;
+                gap: 25px;
+            }
+
+            #university-card,
+            #student-card {
+                order: 0;
+                margin: 0;
+            }
+        }
+
+        @media (max-width: 720px) {
+            .sidebar {
+                position: relative;
+                width: 100%;
+                height: auto;
+                box-shadow: none;
+            }
+
+            .main-content {
+                margin-left: 0;
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- =====================================================
+         Sidebar navigation
+         ===================================================== -->
+    <div class="sidebar">
+        <div class="logo-section">
+            <a href="landing_page.html">
+                <div class="logo-placeholder">
+                    <i class="fas fa-graduation-cap"></i> Edu <span style="color:white">Recommender</span>
+                </div>
+            </a>
+        </div>
+
+        <nav>
+            <a href="landing_page.html"><i class="fas fa-home"></i> Home</a>
+
+            <a href="university_analysis.html"><i class="fas fa-chart-line"></i> Analyst Role</a>
+
+            <div class="sidebar-section-title">Degree Development</div>
+
+            <a href="new_degree_purposals.html" class="submenu-item disabled-link">
+                <i class="fas fa-lightbulb"></i> New Degree Proposals
+            </a>
+
+            <a href="recommended_degree_plan.html" class="submenu-item active-student">
+                <i class="fas fa-graduation-cap"></i> Recommended Degree Plan
+            </a>
+
+            <div class="sidebar-section-title">Curriculum Tools</div>
+
+            <a href="curricumum_enhancement.html" class="submenu-item disabled-link">
+                <i class="fas fa-layer-group"></i> Curriculum Enhancement
+            </a>
+
+            <a href="student_analysis.html" style="margin-top: 20px;"> <i class="fas fa-user-graduate"></i> Student Role
+            </a>
+
+            <a href="personalized_recommendations.html" class="submenu-item">
+                <i class="fas fa-compass"></i> Personalized Recommendations
+            </a>
+
+            <a href="degree_based_recommendations.html" class="submenu-item">
+                <i class="fas fa-brain"></i> Degree-Based Recommendations
+            </a>
+        </nav>
+    </div>
+
+
+
+    <!-- =====================================================
+         Main content area
+         ===================================================== -->
+    <div class="main-content">
+        <div class="container">
+            <!-- Back button -->
+            <a href="javascript:history.back()" class="back-button">⬅ Back to Degree Recommendations</a>
+
+            <!-- Header showing loading university info -->
+            <div class="header-section">
+                <p id="courses-header">Loading University...</p>
+            </div>
+
+            <!-- Title for course recommendations -->
+            <h2 id="courses-title">Loading Course Recommendations...</h2>
+
+            <!-- Loading spinner -->
+            <div id="loading-spinner" style="text-align: center; margin: 50px 0;">
+                <p>Loading data...</p>
+            </div>
+
+            <!-- List of course recommendations -->
+            <ul id="course-recommendation-list"></ul>
+
+            <!-- Skills heatmap chart -->
+            <div id="heatmap-section">
+                <div class="chart-title">Skills Heatmap per Course</div>
+                <div class="chart-container" style="height: 500px;">
+                    <canvas id="skillsHeatmapChart" style="width: 100%; height: 100%;"></canvas>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- =====================================================
+         External Scripts
+         - Chart.js for rendering charts
+         - Chart.js Matrix plugin for heatmap
+         - Custom JS for loading recommendations
+         ===================================================== -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@1.3.0/dist/chartjs-chart-matrix.min.js"></script>
+    <script src="recommended_degree_plan.js"></script>
+
+</body>
+
+</html>

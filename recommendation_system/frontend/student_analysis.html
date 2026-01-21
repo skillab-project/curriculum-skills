@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Analyst Dashboard</title>
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        /* =============================
+           Root CSS variables for consistent theming
+           ============================= */
+        :root {
+            --primary-color: #6a9bd8;
+            --secondary-color: #6c757d;
+            --background-color: #f4f6f9;
+            --sidebar-color: #2c3e50;
+            --card-background: #ffffff;
+            --border-radius: 12px;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --active-sidebar-color: rgba(255, 255, 255, 0.1);
+            --active-sidebar-text: white;
+
+        }
+
+        /* =============================
+           Body and layout
+           ============================= */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            min-height: 100vh;
+        }
+
+
+        /* =============================
+           Sidebar styles
+           ============================= */
+        .sidebar {
+            width: 250px;
+            background-color: var(--sidebar-color);
+            color: #ecf0f1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+
+        }
+
+        /* Logo section inside sidebar */
+        .logo-section {
+            padding-bottom: 25px;
+            margin-bottom: 25px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            width: 100%;
+        }
+
+        .logo-section a {
+            text-decoration: none;
+            /* Remove underline */
+        }
+
+        .logo-placeholder {
+            font-size: 2em;
+            font-weight: 700;
+            color: var(--primary-color);
+            text-align: center;
+        }
+
+        .logo-placeholder span {
+            color: #ecf0f1;
+        }
+
+        /* Navigation links in sidebar */
+        .sidebar nav {
+            width: 100%;
+        }
+
+        /* Main links */
+        .sidebar nav a {
+            color: #ecf0f1;
+            text-decoration: none;
+            padding: 13px 15px;
+            /* ίδιο ύψος όπως στον πρώτο κώδικα */
+            display: block;
+            margin-bottom: 13px;
+            /* ίδιο κενό μεταξύ links */
+            border-radius: 4px;
+            transition: background-color 0.2s, color 0.2s;
+
+        }
+
+        /* Hover effect */
+        .sidebar nav a:hover {
+            background-color: var(--active-sidebar-color);
+            color: var(--primary-color);
+        }
+
+        /* Active student link */
+        .sidebar nav a.active-student {
+            background-color: var(--active-sidebar-color);
+            color: var(--active-sidebar-text);
+            font-weight: 600;
+        }
+
+
+
+
+        /* Submenu items are indented */
+        .submenu-item {
+            padding-left: 35px !important;
+            font-size: 0.9em !important;
+            margin-top: -5px !important;
+
+
+        }
+
+
+
+        /* =============================
+           Main content area
+           ============================= */
+        .main-content {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+
+
+        /* Container for the selection hub */
+        .selection-hub {
+            text-align: center;
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        .selection-hub h1 {
+            font-size: 2.3em;
+            margin-bottom: 15px;
+            color: #343a40;
+        }
+
+        .selection-hub p {
+            color: var(--secondary-color);
+            font-size: 1.2em;
+            margin-bottom: 50px;
+        }
+
+        /* Buttons group layout */
+        .button-group-large {
+            display: flex;
+            gap: 50px;
+            justify-content: center;
+            flex-wrap: wrap;
+            /* Stack on smaller screens */
+        }
+
+        /* Individual selection button styling */
+        .selection-button {
+            flex: 1;
+            min-width: 300px;
+            max-width: 380px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 50px 35px;
+            border-radius: var(--border-radius);
+            background-color: #e6f0fb;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 2px solid var(--primary-color);
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+        }
+
+        /* Hover effect for buttons */
+        .selection-button:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.15);
+            border: 2px solid var(--primary-color);
+            background-color: #d4e4f9;
+        }
+
+        /* Icon inside the button */
+        .selection-button i {
+            font-size: 3.5em;
+            margin-bottom: 25px;
+            color: var(--primary-color);
+        }
+
+        /* Main button text */
+        .button-text {
+            font-size: 1.6em;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        /* Button subtext */
+        .button-subtext {
+            font-size: 1.05em;
+            color: var(--secondary-color);
+        }
+
+        .sidebar-section-title {
+            margin: 20px 0 5px 20px;
+            /* μικρότερο top & bottom για ομοιόμορφη απόσταση */
+            font-size: 0.78em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+
+        /* Απενεργοποιεί τα clicks για τα συγκεκριμένα links */
+
+        .disabled-link {
+            pointer-events: none;
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        /* ---------------------------
+   SIDEBAR: Ισομερή απόσταση Home ↔ Analyst ↔ Student
+--------------------------- */
+
+
+
+        /* Αν θέλουμε πιο ακριβή απόσταση για συγκεκριμένα links */
+        .sidebar nav a.active-landing {
+            /* Home */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="university_analysis.html"] {
+            /* Analyst */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="student_analysis.html"] {
+            /* Student */
+            margin-top: 20px;
+            /* διαχωρισμός από υπομενού Degree Development */
+        }
+
+
+        /* ---------------------------
+   ROLE CARDS: Analyst πιο κοντά στο Degree Development
+--------------------------- */
+        .role-cards {
+            display: flex;
+            gap: 40px;
+            /* απόσταση μεταξύ των καρτών */
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+
+        /* Φέρνουμε Analyst πιο κοντά */
+        #university-card {
+            order: 1;
+            /* εμφανίζεται πρώτος αν θέλουμε πιο κοντά στην αρχή */
+            margin-right: -10px;
+            /* μικρή αρνητική τιμή για να φανεί πιο κοντά */
+        }
+
+
+        /* Student κάρτα */
+        #student-card {
+            order: 2;
+            margin-left: 10px;
+            /* μικρή απόσταση από Analyst */
+        }
+
+
+        /* Responsive tweak αν χρειαστεί */
+        @media (max-width: 768px) {
+            .role-cards {
+                flex-direction: column;
+                gap: 25px;
+            }
+
+            #university-card,
+            #student-card {
+                order: 0;
+                margin: 0;
+            }
+        }
+
+        /* Responsive design for smaller screens */
+        @media (max-width: 900px) {
+            .button-group-large {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- =============================
+         Sidebar navigation
+         ============================= -->
+    <div class="sidebar">
+        <div class="logo-section">
+            <a href="landing_page.html">
+                <div class="logo-placeholder">
+                    <i class="fas fa-graduation-cap"></i> Edu <span>Recommender</span>
+                </div>
+            </a>
+        </div>
+
+        <!-- Navigation links -->
+        <nav>
+            <a href="landing_page.html"><i class="fas fa-home"></i> Home</a>
+            <a href="university_analysis.html"><i class="fas fa-chart-line"></i> Analyst Role</a>
+            <div class="sidebar-section-title">Degree Development</div>
+            <a href="new_degree_purposals.html" class="submenu-item disabled-link"><i class="fas fa-lightbulb"></i> New
+                Degree
+                Proposals</a>
+            <a href="recommended_degree_plan.html" class="submenu-item disabled-link"><i
+                    class="fas fa-graduation-cap"></i>
+                Recommended Degree Plan</a>
+            <div class="sidebar-section-title">Curriculum Tools</div>
+            <a href="curricumum_enhancement.html" class="submenu-item disabled-link"><i class="fas fa-layer-group"></i>
+                Curriculum
+                Enhancement</a>
+            <a href="student_analysis.html" class="active-student" style="margin-top: 20px;"><i
+                    class="fas fa-user-graduate"></i> Student Role</a>
+            <a href="personalized_recommendations.html" class="submenu-item"><i class="fas fa-compass"></i> Personalized
+                Recommendations</a>
+            <a href="degree_based_recommendations.html" class="submenu-item"><i class="fas fa-brain"></i> Degree-Based
+                Recommendations</a>
+        </nav>
+    </div>
+
+    <!-- =============================
+         Main content area: Selection hub
+         ============================= -->
+    <div class="main-content">
+        <div class="selection-hub">
+            <!-- Page title -->
+            <h1><i class="fas fa-user-graduate" style="color: var(--primary-color);"></i> Student Analyst Dashboard</h1>
+            <p>Select the recommendation type to get started.</p>
+
+            <!-- Buttons for two types of recommendations -->
+            <div class="button-group-large">
+                <!-- Elective course suggestion button -->
+                <button id="btnElectives" class="selection-button">
+                    <i class="fas fa-pencil-alt"></i>
+                    <span class="button-text">ELECTIVE COURSE SUGGESTION</span>
+                    <span class="button-subtext">Based on your current degree and skills.</span>
+                </button>
+
+                <!-- New degree suggestion button -->
+                <button id="btnNewDegrees" class="selection-button">
+                    <i class="fas fa-globe-europe"></i>
+                    <span class="button-text">NEW DEGREE SUGGESTION</span>
+                    <span class="button-subtext">Search global programs based on your skills.</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- =============================
+         JavaScript for button functionality
+         ============================= -->
+    <script>
+        // Navigate to degree-based recommendations when the first button is clicked
+        document.getElementById('btnElectives').addEventListener('click', function () {
+            window.location.href = 'degree_based_recommendations.html';
+        });
+
+        // Navigate to personalized recommendations when the second button is clicked
+        document.getElementById('btnNewDegrees').addEventListener('click', function () {
+            window.location.href = 'personalized_recommendations.html';
+        });
+    </script>
+</body>
+
+</html>

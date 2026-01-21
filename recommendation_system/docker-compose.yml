@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 2003Sept!
+      MYSQL_DATABASE: recommender_test1
+      MYSQL_ROOT_HOST: "%"
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: "3306"
+      DATABASE_NAME: recommender_test1
+      DATABASE_USER: root
+      DATABASE_PASSWORD: 2003Sept!
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:8000/docs || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Αν χρειαστείς URL του API μέσα στο frontend, μπορείς να βάλεις
+      REACT_APP_API_URL: http://api:8000
+    ports:
+      - "3000:80"
+
+volumes:
+  db_data:
+
+
+networks:
+  default:
+    name: skillcrawl_network

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edu Recommender - University Analyst Dashboard</title>
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        /* =============================
+           Root CSS variables for consistent theming
+           ============================= */
+        :root {
+            --primary-color: #6a9bd8;
+            --analyst-color: #5cb85c;
+            --analyst-light-color: #79c792;
+            --secondary-color: #6c757d;
+            --background-color: #f4f6f9;
+            --sidebar-color: #2c3e50;
+            --card-background: #ffffff;
+            --border-radius: 8px;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --active-sidebar-color: rgba(255, 255, 255, 0.1);
+            --active-sidebar-text: white;
+        }
+
+        /* =============================
+           Body and layout
+           ============================= */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            /* Use flexbox for sidebar + main content layout */
+            min-height: 100vh;
+            /* Full viewport height */
+        }
+
+        /* =============================
+           Sidebar styles
+           ============================= */
+        .sidebar {
+            width: 250px;
+            background-color: var(--sidebar-color);
+            color: #ecf0f1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Logo section at the top of sidebar */
+        .logo-section {
+            padding-bottom: 25px;
+            margin-bottom: 25px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            width: 100%;
+        }
+
+        .logo-section a {
+            text-decoration: none;
+            /* Remove underline */
+        }
+
+        .logo-placeholder {
+            font-size: 2em;
+            font-weight: 700;
+            color: var(--primary-color);
+            text-align: center;
+        }
+
+        .logo-placeholder span {
+            color: #ecf0f1;
+        }
+
+        /* Navigation links in sidebar */
+        .sidebar nav {
+            width: 100%;
+        }
+
+        .sidebar nav a {
+            color: #ecf0f1;
+            text-decoration: none;
+            padding: 10px 15px;
+            display: block;
+            margin-bottom: 5px;
+            border-radius: 4px;
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        /* Hover effect for sidebar links */
+        .sidebar nav a:hover {
+            background-color: var(--active-sidebar-color);
+            color: var(--primary-color);
+        }
+
+        /* Active landing page link styling */
+        .sidebar nav a.active-landing {
+            background-color: var(--active-sidebar-color);
+            color: var(--active-sidebar-text);
+            font-weight: 600;
+        }
+
+        /* Submenu items styling */
+        .submenu-item {
+            padding-left: 35px !important;
+            font-size: 0.9em !important;
+            margin-top: -5px !important;
+        }
+
+        .submenu-item.active {
+            color: var(--analyst-light-color);
+        }
+
+        /* =============================
+           Main content styling
+           ============================= */
+        /* Main content styling tweak */
+        .main-content {
+            flex-grow: 1;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+            /* οριζόντια κεντράρισμα */
+            align-items: flex-start;
+            /* θα το αλλάξουμε σε center για να κατέβει λίγο */
+            min-height: 100vh;
+            /* για να καταλαμβάνει όλο το ύψος */
+            box-sizing: border-box;
+        }
+
+        /* Κάθετη τοποθέτηση του container */
+        .container {
+            width: 100%;
+            max-width: 900px;
+            text-align: center;
+            margin-top: 80px;
+            /* φέρνει λίγο πιο κάτω το περιεχόμενο */
+        }
+
+        /* Header section inside main content */
+        .header {
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            color: #343a40;
+            font-size: 2.3em;
+            font-weight: 700;
+        }
+
+        .header p {
+            color: var(--secondary-color);
+            font-size: 1.1em;
+            margin: 0;
+        }
+
+        /* =============================
+           Metrics grid
+           ============================= */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            /* Responsive grid */
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        /* Individual metric cards */
+        .metric-card {
+            background: var(--card-background);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            border: 2px solid var(--analyst-light-color);
+            transition: transform 0.3s;
+        }
+
+        .metric-card h3 {
+            font-size: 2.5em;
+            color: var(--analyst-color);
+            margin: 0 0 5px 0;
+            font-weight: 700;
+        }
+
+        .metric-card p {
+            font-size: 1em;
+            color: var(--secondary-color);
+            margin: 0;
+            font-weight: 600;
+        }
+
+        /* =============================
+           Action buttons
+           ============================= */
+        .action-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        .action-button {
+            padding: 15px 30px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border: none;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.2s;
+            width: 50%;
+            max-width: 300px;
+            text-transform: uppercase;
+        }
+
+        /* Disabled button styling */
+        .action-button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        #degrees-btn {
+            background-color: var(--analyst-color);
+            color: white;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        #degrees-btn:hover:not(:disabled) {
+            background-color: #4cae4c;
+        }
+
+        #courses-btn {
+            background-color: #e0e0e0;
+            color: var(--secondary-color);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        #courses-btn:hover:not(:disabled) {
+            background-color: #cccccc;
+        }
+
+        /* =============================
+           Custom dropdown styling
+           ============================= */
+        .custom-select-wrapper {
+            position: relative;
+            width: 100%;
+            font-size: 1em;
+            margin-bottom: 40px;
+        }
+
+        .custom-select {
+            position: relative;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .custom-select-trigger {
+            padding: 12px 15px;
+            border: 2px solid var(--analyst-light-color);
+            border-radius: 4px;
+            background-color: #fff;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .custom-options {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background-color: #fff;
+            border: 2px solid var(--analyst-light-color);
+            border-top: none;
+            border-radius: 0 0 var(--border-radius) var(--border-radius);
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+            z-index: 100;
+        }
+
+        .disabled-link {
+            pointer-events: none;
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .custom-option {
+            padding: 12px 15px;
+            cursor: pointer;
+            transition: background 0.2s, color 0.2s;
+        }
+
+        /* Hover and selected states for dropdown options */
+        .custom-option:hover,
+        .custom-option.selected {
+            background-color: var(--analyst-light-color);
+            color: #fff;
+        }
+
+        /* Show options when dropdown is open */
+        .custom-select.open .custom-options {
+            display: block;
+        }
+
+        .sidebar-section-title {
+            margin: 25px 0 8px 20px;
+            font-size: 0.78em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        /* ---------------------------
+   SIDEBAR: Ισομερή απόσταση Home ↔ Analyst ↔ Student
+--------------------------- */
+        .sidebar nav a {
+            display: block;
+            padding: 12px 15px;
+            /* αυξημένο padding για πιο ομοιόμορφη απόσταση */
+            margin-bottom: 12px;
+            /* ίδιο κενό μεταξύ links */
+        }
+
+
+        /* Αν θέλουμε πιο ακριβή απόσταση για συγκεκριμένα links */
+        .sidebar nav a.active-landing {
+            /* Home */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="university_analysis.html"] {
+            /* Analyst */
+            margin-bottom: 12px;
+        }
+
+
+        .sidebar nav a[href="student_analysis.html"] {
+            /* Student */
+            margin-top: 20px;
+            /* διαχωρισμός από υπομενού Degree Development */
+        }
+
+
+        /* ---------------------------
+   ROLE CARDS: Analyst πιο κοντά στο Degree Development
+--------------------------- */
+        .role-cards {
+            display: flex;
+            gap: 40px;
+            /* απόσταση μεταξύ των καρτών */
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+
+        /* Φέρνουμε Analyst πιο κοντά */
+        #university-card {
+            order: 1;
+            /* εμφανίζεται πρώτος αν θέλουμε πιο κοντά στην αρχή */
+            margin-right: -10px;
+            /* μικρή αρνητική τιμή για να φανεί πιο κοντά */
+        }
+
+
+        /* Student κάρτα */
+        #student-card {
+            order: 2;
+            margin-left: 10px;
+            /* μικρή απόσταση από Analyst */
+        }
+
+
+        /* Responsive tweak αν χρειαστεί */
+        @media (max-width: 768px) {
+            .role-cards {
+                flex-direction: column;
+                gap: 25px;
+            }
+
+            #university-card,
+            #student-card {
+                order: 0;
+                margin: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- =============================
+         Sidebar navigation
+         ============================= -->
+    <div class="sidebar">
+        <div class="logo-section">
+            <a href="landing_page.html">
+                <div class="logo-placeholder">
+                    <i class="fas fa-graduation-cap"></i> Edu <span>Recommender</span>
+                </div>
+            </a>
+        </div>
+
+        <nav>
+            <!-- Main navigation links -->
+            <a href="landing_page.html">
+                <i class="fas fa-home"></i> Home
+            </a>
+
+            <a href="university_analysis.html" class="active-landing">
+                <i class="fas fa-chart-line"></i> Analyst Role
+            </a>
+
+            <!-- SECTION TITLE 1 -->
+            <div class="sidebar-section-title">Degree Development</div>
+
+            <a href="new_degree_purposals.html" class="submenu-item disabled-link">
+                <i class="fas fa-lightbulb"></i> New Degree Proposals
+            </a>
+
+            <a href="recommended_degree_plan.html" class="submenu-item disabled-link">
+                <i class="fas fa-graduation-cap"></i> Recommended Degree Plan
+            </a>
+
+            <!-- SECTION TITLE 2 -->
+            <div class="sidebar-section-title">Curriculum Tools</div>
+
+            <a href="curricumum_enhancement.html" class="submenu-item disabled-link">
+                <i class="fas fa-layer-group"></i> Curriculum Enhancement
+            </a>
+
+            <!-- Student Role section -->
+            <a href="student_analysis.html" style="margin-top: 20px;">
+                <i class="fas fa-user-graduate"></i> Student Role
+            </a>
+            <a href="degree_based_recommendations.html" class="submenu-item">
+                <i class="fas fa-compass"></i> Personalized Recommendations
+            </a>
+            <a href="personalized_recommendations.html" class="submenu-item">
+                <i class="fas fa-brain"></i> Degree-Based Recommendations
+            </a>
+        </nav>
+
+    </div>
+
+    <!-- =============================
+         Main content
+         ============================= -->
+    <div class="main-content">
+        <div class="container">
+            <!-- Header section -->
+            <div class="header">
+                <h1><i class="fas fa-university" style="color: var(--analyst-color);"></i> University Analyst Dashboard
+                </h1>
+                <p>Metrics Overview, Gap Analysis, and Program Recommendations</p>
+            </div>
+
+            <!-- Custom dropdown for university selection -->
+            <div class="custom-select-wrapper">
+                <div class="custom-select">
+                    <div class="custom-select-trigger">Select University...</div>
+                    <div class="custom-options"></div>
+                </div>
+            </div>
+
+            <!-- Metrics grid -->
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3 id="total-programs">0</h3>
+                    <p>Total Study Programs</p>
+                </div>
+                <div class="metric-card">
+                    <h3 id="recognized-skills">0</h3>
+                    <p>Recognized Skills (ESCO)</p>
+                </div>
+            </div>
+
+            <!-- Action buttons for analyses -->
+            <div class="action-buttons">
+                <button id="degrees-btn" class="action-button" disabled>RUN NEW DEGREE ANALYSIS</button>
+                <button id="courses-btn" class="action-button" disabled>RUN COURSE GAP ANALYSIS</button>
+            </div>
+
+            <div id="results"></div>
+        </div>
+    </div>
+
+    <!-- External JavaScript for dynamic functionality -->
+    <script src="university_analysis.js"> </script>
+</body>
+
+</html>
