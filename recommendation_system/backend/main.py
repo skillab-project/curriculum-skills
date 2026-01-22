@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from recommendation_system.backend.database import init_db
-from recommendation_system.backend.routers import  recommendations, electives, filters
+from recommendation_system.backend.routers import  recommendations, electives, filters, policy
+
 
 app = FastAPI(
     title="Academic Recommender API",
@@ -55,6 +56,12 @@ app.include_router(
 app.include_router(
     filters.router,
     tags=["Filters"]
+)
+
+# --- Education Policy (MySQL) ---
+app.include_router(
+    policy.router,
+    tags=["Education Policy"]
 )
 
 # ----------------------------------

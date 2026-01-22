@@ -6,4 +6,6 @@ scikit-learn
 jupyter
 matplotlib
 fastapi
+uvicorn
+requests
 
