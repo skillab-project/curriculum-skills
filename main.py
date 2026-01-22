@@ -85,6 +85,7 @@ from datetime import datetime
 from recommendation_system.backend.routers.electives import router as electives_router
 from recommendation_system.backend.routers.filters import router as filters_router
 from recommendation_system.backend.routers.recommendations import router as recommendations_router
+from recommendation_system.backend.routers.policy import router as policy_router
 
 
 logger = logging.getLogger("db_saver")
@@ -225,6 +226,10 @@ app.include_router(
     tags=["Recommendation"]
 )
 
+app.include_router(
+    policy_router,
+    tags=["Education Policy"]
+)
 
 class DebugPDFRequest(BaseModel):
     pdf_name: str

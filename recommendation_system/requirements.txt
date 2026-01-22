@@ -8,4 +8,8 @@ matplotlib
 fastapi
 uvicorn
 requests
+python-multipart
+openpyxl
+httpx
+
 

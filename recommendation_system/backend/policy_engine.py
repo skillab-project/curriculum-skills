@@ -1,12 +1,26 @@
 import os
-import json
 import pandas as pd
 import requests
 import logging
+import mysql.connector
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-# Ρύθμιση logging
+# 1. Κάνουμε Import το DB_CONFIG από το κεντρικό config.py
+try:
+    from config import DB_CONFIG
+except ImportError:
+    # Fallback για development αν τρέχεις το αρχείο μεμονωμένα
+    import os
+
+    DB_CONFIG = {
+        "host": os.getenv("DB_HOST", "localhost"),
+        "port": int(os.getenv("DB_PORT", 3306)),
+        "user": os.getenv("DB_USER", "root"),
+        "password": os.getenv("DB_PASSWORD", "root"),
+        "database": os.getenv("DB_NAME", "skillcrawl"),
+    }
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,27 +33,19 @@ class RecommendationResult:
 
 class EducationRecommendationSystem:
 
-    def __init__(self, service2_url: str, service3_url: str, csv_path: str):
+    def __init__(self, service2_url: str, unused_service3_url: str, csv_path: str):
         self.service2_url = service2_url
-        self.service3_url = service3_url
         self.csv_path = csv_path
-
-        # Cache για να θυμόμαστε τη χώρα κάθε πανεπιστημίου και να μην ρωτάμε συνέχεια το API
-        # Μορφή: { "University Name": "Country" }
-        self.uni_country_cache = {}
 
     def load_occupation_titles_from_csv(self) -> List[str]:
         if not os.path.exists(self.csv_path):
             logger.error(f"CSV file not found at: {self.csv_path}")
             return []
-
         try:
             df = pd.read_csv(self.csv_path, sep=',', quotechar='"')
             df.columns = df.columns.str.strip().str.replace('"', '')
-
             if 'Label3' not in df.columns or 'Label4' not in df.columns:
                 return []
-
             level3 = df['Label3'].dropna().tolist()
             level4 = df['Label4'].dropna().tolist()
             return list(set(level3 + level4))
@@ -48,9 +54,11 @@ class EducationRecommendationSystem:
             return []
 
     def get_required_skills(self, occupation_titles: List[str], min_val: float = 0.7) -> Dict[str, List[str]]:
+        """
+        Καλεί το Service 2 (Required Skills) - Εξωτερικό API.
+        """
         occupation_skills = {}
-        # ΣΗΜΕΙΩΣΗ: Βάζουμε slice [:30] για να μην αργεί πολύ το demo.
-        # Για πλήρη ανάλυση αφαίρεσε το [:30].
+        # Slice για ταχύτητα (π.χ. 30).
         for occupation in occupation_titles[:30]:
             try:
                 payload = {"occupation_name": occupation}
@@ -58,12 +66,10 @@ class EducationRecommendationSystem:
 
                 if resp.status_code == 200 and resp.text:
                     data = resp.json()
-                    # Έλεγχος για error messages που επιστρέφουν 200 ΟΚ
                     if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
                         if "cannot open" in data[0].lower():
                             occupation_skills[occupation] = []
                             continue
-
                     filtered = []
                     if isinstance(data, list):
                         for item in data:
@@ -77,88 +83,100 @@ class EducationRecommendationSystem:
         return occupation_skills
 
     def get_all_countries_skills(self) -> Dict[str, List[str]]:
+        """
+        Τραβάει από τη βάση (MySQL) όλα τα skills ανά χώρα χρησιμοποιώντας το DB_CONFIG.
+        """
+        results = {}
+        conn = None
         try:
-            # Endpoint 2: Skills Location
-            resp = requests.get(f"{self.service3_url}/exploratory/skills_location", timeout=20)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = {}
-                for entry in data:
-                    c_name = entry.get('country')
-                    skills = [s.get('skill') for s in entry.get('skills', []) if 'skill' in s]
-                    if c_name:
-                        results[c_name] = skills
-                return results
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor(dictionary=True)
+
+            # Το query βασίζεται στο σχήμα που μου έστειλες (skillcrawl.sql)
+            query = """
+                SELECT u.country, s.skill_name
+                FROM Skill s
+                JOIN CourseSkill cs ON s.skill_id = cs.skill_id
+                JOIN Course c ON cs.course_id = c.course_id
+                JOIN University u ON c.university_id = u.university_id
+                WHERE s.skill_name IS NOT NULL AND s.skill_name != '' AND u.country IS NOT NULL
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            from collections import defaultdict
+            grouped = defaultdict(list)
+
+            for r in rows:
+                country = r["country"]
+                skill = r["skill_name"]
+                grouped[country].append(skill)
+
+            results = dict(grouped)
+
         except Exception as e:
-            logger.error(f"Error fetching countries: {e}")
-        return {}
+            logger.error(f"DB Error in get_all_countries_skills: {e}")
+        finally:
+            if conn and conn.is_connected():
+                conn.close()
 
-    def get_university_country(self, uni_name: str) -> str:
-        """
-        Endpoint 4: Ρωτάει το API σε ποια χώρα ανήκει το πανεπιστήμιο.
-        """
-        # 1. Έλεγχος Cache
-        if uni_name in self.uni_country_cache:
-            return self.uni_country_cache[uni_name]
-
-        # 2. Κλήση API
-        try:
-            params = {"university_name": uni_name, "page": 1, "per_page": 1}
-            resp = requests.get(f"{self.service3_url}/university/all", params=params, timeout=5)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                # Δομή response: { "university": { "country": "Greece", ... } }
-                uni_data = data.get("university", {})
-                country = uni_data.get("country", "Unknown")
-
-                # Αποθήκευση στη μνήμη
-                self.uni_country_cache[uni_name] = country
-                return country
-        except Exception:
-            pass
-
-        return "Unknown"
+        return results
 
     def get_courses_from_other_countries(self, skills: List[str], current_country: str) -> Dict[str, List[str]]:
+        """
+        Βρίσκει μαθήματα για τα skills, ΑΠΟΚΛΕΙΟΝΤΑΣ την τρέχουσα χώρα μέσω SQL.
+        Επιστρέφει: 'Μάθημα (Πανεπιστήμιο) - [Χώρα]'
+        """
         skill_courses = {}
+        conn = None
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor(dictionary=True)
 
-        # Endpoint 3: Search Skill (Παίρνουμε δείγμα 20 skills για ταχύτητα)
-        for skill in skills[:20]:
-            try:
-                resp = requests.get(f"{self.service3_url}/search_skill", params={"skill": skill}, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    courses = []
+            # Παίρνουμε δείγμα skills για ταχύτητα
+            for skill in skills[:20]:
+                # SQL QUERY: Φέρε μαθήματα που έχουν αυτό το skill
+                # ΚΑΙ η χώρα του πανεπιστημίου ΔΕΝ είναι η 'current_country'
+                query = """
+                    SELECT c.lesson_name, u.university_name, u.country
+                    FROM Skill s
+                    JOIN CourseSkill cs ON s.skill_id = cs.skill_id
+                    JOIN Course c ON cs.course_id = c.course_id
+                    JOIN University u ON c.university_id = u.university_id
+                    WHERE s.skill_name LIKE %s 
+                    AND u.country <> %s 
+                    AND u.country <> 'Unknown'
+                    LIMIT 10
+                """
+                cursor.execute(query, (f"%{skill}%", current_country))
+                rows = cursor.fetchall()
 
-                    if isinstance(data, dict) and 'universities' in data:
-                        for uni_name, c_list in data['universities'].items():
+                courses = []
+                for r in rows:
+                    c_name = r["lesson_name"]
+                    u_name = r["university_name"]
+                    u_country = r["country"]
 
-                            # === ΕΞΥΠΝΟ ΦΙΛΤΡΑΡΙΣΜΑ ===
-                            # Βρίσκουμε την πραγματική χώρα του Πανεπιστημίου
-                            real_country = self.get_university_country(uni_name)
+                    if current_country.lower() in u_name.lower():
+                        continue
 
-                            # Αν η χώρα του Πανεπιστημίου είναι η ίδια με τη χώρα που αναλύουμε, ΤΟ ΑΓΝΟΟΥΜΕ.
-                            if real_country == current_country:
-                                continue
+                    courses.append(f"{c_name} ({u_name}) - [{u_country}]")
 
-                            # Fallback: Αν το API δεν βρήκε χώρα (Unknown), κάνουμε έλεγχο με το όνομα
-                            if real_country == "Unknown" and current_country.lower() in uni_name.lower():
-                                continue
+                if courses:
+                    skill_courses[skill] = list(set(courses))
 
-                            # Προσθήκη στη λίστα με ένδειξη χώρας
-                            country_str = f" - [{real_country}]" if real_country != "Unknown" else ""
+        except Exception as e:
+            logger.error(f"DB Error in get_courses_from_other_countries: {e}")
+        finally:
+            if conn and conn.is_connected():
+                conn.close()
 
-                            for c in c_list:
-                                courses.append(f"{c} ({uni_name}){country_str}")
-
-                    skill_courses[skill] = list(set(courses))[:10]
-            except Exception:
-                skill_courses[skill] = []
-
-        return {k: v for k, v in skill_courses.items() if v}
+        return skill_courses
 
     def run_analysis(self, skill_threshold: float = 0.7) -> Dict[str, Any]:
+        """
+        Κεντρική συνάρτηση εκτέλεσης.
+        """
         occupations = self.load_occupation_titles_from_csv()
         if not occupations:
             return {"error": "No occupations found"}
@@ -166,28 +184,26 @@ class EducationRecommendationSystem:
         logger.info(f"Loading required skills (threshold={skill_threshold})...")
         req_skills = self.get_required_skills(occupations, skill_threshold)
 
-        logger.info("Loading university skills for all countries...")
+        logger.info("Loading university skills from DB...")
         country_data = self.get_all_countries_skills()
 
         final_results = {}
 
         for country, c_skills in country_data.items():
             logger.info(f"Analyzing country: {country}")
+
             all_req = set()
             for s_list in req_skills.values():
                 all_req.update(s_list)
 
-            # Τι λείπει από τη χώρα
-            missing = all_req - set(c_skills)
+            missing = set(all_req) - set(c_skills)
 
-            # Προτάσεις Τμημάτων
             missing_depts = {}
             for occ, skills in req_skills.items():
                 inter = set(skills).intersection(missing)
                 if inter:
                     missing_depts[occ] = list(inter)
 
-            # Προτάσεις Μαθημάτων (από άλλες χώρες)
             missing_courses = {}
             if missing:
                 missing_courses = self.get_courses_from_other_countries(list(missing), country)

@@ -1,21 +1,43 @@
 import os
+import logging
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Query
 from sqlalchemy.orm import Session, declarative_base
 from sqlalchemy import Column, Integer, String, JSON, TIMESTAMP, text
 
-# Χρησιμοποιούμε την υπάρχουσα MySQL σύνδεση
-from recommendation_system.backend.database import get_db, engine
+# Imports από τη δομή του project
+from recommendation_system.backend.database import get_db, engine, SessionLocal
 from recommendation_system.backend.policy_engine import EducationRecommendationSystem
+
+# Ρύθμιση Logger
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-SERVICE2_URL = "https://portal.skillab-project.eu/required-skills"
-SERVICE3_URL = "https://portal.skillab-project.eu/curriculum-skills"
-CSV_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "New_occupation_table.csv")
+# ==========================================
+# 1. RΥΘΜΙΣΕΙΣ & ENVIRONMENT VARIABLES
+# ==========================================
+
+# Service 2: Required Skills (Εξωτερικό API)
+SERVICE2_URL = os.getenv(
+    "REQUIRED_SKILLS_SERVICE_URL",
+    "https://portal.skillab-project.eu/required-skills"
+)
+
+# Υπολογισμός διαδρομής CSV
+# .../backend/routers/policy.py -> .../backend/data/New_occupation_table.csv
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV_PATH = os.path.join(BASE_DIR, "data", "New_occupation_table.csv")
+
+# Έλεγχος αρχείου CSV (για debugging)
+if not os.path.exists(CSV_PATH):
+    logger.warning(f"⚠️ CSV file NOT found at: {CSV_PATH}. Please upload it.")
+else:
+    logger.info(f"✅ CSV file found at: {CSV_PATH}")
 
 # ==========================================
-# 1. ΟΡΙΣΜΟΣ ΜΟΝΤΕΛΟΥ MYSQL (In-file)
+# 2. ΟΡΙΣΜΟΣ ΜΟΝΤΕΛΟΥ MYSQL (ΓΙΑ ΤΑ ΑΠΟΤΕΛΕΣΜΑΤΑ)
 # ==========================================
+# Χρησιμοποιούμε δικό του Base για να μην επηρεάσουμε τους άλλους πίνακες
 BasePolicy = declarative_base()
 
 
@@ -25,7 +47,7 @@ class PolicyRecommendation(BasePolicy):
     id = Column(Integer, primary_key=True, index=True)
     country = Column(String(100), nullable=False, index=True)
 
-    # Στη MySQL το JSON υποστηρίζεται κανονικά (MySQL 5.7+)
+    # Αποθήκευση των αποτελεσμάτων ως JSON
     missing_departments = Column(JSON, nullable=True)
     missing_courses = Column(JSON, nullable=True)
 
@@ -33,23 +55,29 @@ class PolicyRecommendation(BasePolicy):
 
 
 # ==========================================
-# 2. LOGIC & ENDPOINTS
+# 3. BACKGROUND TASK WRAPPERS
 # ==========================================
 
-def run_policy_analysis_task(db: Session, threshold: float):
-    print(f"Starting Education Policy Analysis with threshold: {threshold} (MySQL)...")
+def run_policy_analysis_logic(db: Session, threshold: float):
+    """
+    Η κύρια λογική που τρέχει στο background.
+    """
+    logger.info(f"Starting Education Policy Analysis (Threshold: {threshold})")
 
-    system = EducationRecommendationSystem(SERVICE2_URL, SERVICE3_URL, CSV_PATH)
+    # Αρχικοποίηση Engine (Service 3 δεν χρειάζεται URL πια, βάζουμε dummy string)
+    system = EducationRecommendationSystem(SERVICE2_URL, "unused", CSV_PATH)
+
+    # Εκτέλεση ανάλυσης (τραβάει δεδομένα με mysql.connector μέσω του policy_engine)
     results = system.run_analysis(skill_threshold=threshold)
 
     if "error" in results:
-        print(f"❌ Analysis failed: {results['error']}")
+        logger.error(f"❌ Analysis failed: {results.get('error')}")
         return
 
     try:
         count = 0
         for country, data in results.items():
-            # Έλεγχος αν υπάρχει εγγραφή για τη χώρα
+            # Έλεγχος αν υπάρχει ήδη εγγραφή (SQLAlchemy)
             existing = db.query(PolicyRecommendation).filter_by(country=country).first()
 
             if existing:
@@ -65,13 +93,26 @@ def run_policy_analysis_task(db: Session, threshold: float):
             count += 1
 
         db.commit()
-        print(f"✅ Analysis completed. Updated/Created {count} records in MySQL.")
+        logger.info(f"✅ Analysis completed. Saved/Updated {count} country records.")
     except Exception as e:
-        print(f"❌ Database error: {e}")
+        logger.error(f"❌ Database save error: {e}")
         db.rollback()
+
+
+def background_task_wrapper(threshold: float):
+    """
+    Δημιουργεί νέο Session για το background task, γιατί το session του request κλείνει.
+    """
+    db = SessionLocal()
+    try:
+        run_policy_analysis_logic(db, threshold)
     finally:
         db.close()
 
+
+# ==========================================
+# 4. ENDPOINTS
+# ==========================================
 
 @router.post("/policy/analyze", summary="Trigger multi-country policy analysis (Background)")
 def trigger_analysis(
@@ -81,43 +122,41 @@ def trigger_analysis(
 ):
     """
     Ξεκινάει την ανάλυση στο παρασκήνιο.
-    Αυτόματα δημιουργεί τον πίνακα 'policy_recommendations' στη MySQL αν δεν υπάρχει.
+    Δημιουργεί τον πίνακα 'policy_recommendations' αν δεν υπάρχει.
     """
 
-    # --- TABLE CREATION (MySQL) ---
+    # --- LAZY TABLE CREATION ---
     try:
-        # Αυτή η εντολή δημιουργεί τον πίνακα ΜΟΝΟ αν δεν υπάρχει
+        # Δημιουργία πίνακα στη βάση (αν δεν υπάρχει ήδη)
         BasePolicy.metadata.create_all(bind=engine)
-        print("✅ Checked/Created 'policy_recommendations' table in MySQL.")
+        logger.info("Checked/Created 'policy_recommendations' table.")
     except Exception as e:
-        print(f"❌ Error creating table: {e}")
-        raise HTTPException(status_code=500, detail=f"Could not initialize MySQL table: {e}")
-    # -----------------------------------
+        logger.error(f"❌ Error creating table: {e}")
+        # Δεν κάνουμε raise εδώ για να προσπαθήσει να τρέξει το task,
+        # αλλά καλό είναι να το ξέρουμε στα logs.
 
-    background_tasks.add_task(run_policy_analysis_task, db, threshold)
+    # Εκκίνηση Background Task με τον wrapper
+    background_tasks.add_task(background_task_wrapper, threshold)
 
     return {
-        "message": "Analysis started in background. Table checked/created in MySQL.",
-        "parameters": {"threshold": threshold}
+        "message": "Analysis started in background.",
+        "info": "Results will be saved to MySQL. Use GET /policy/results later to view them."
     }
 
 
 @router.get("/policy/results", summary="Get all policy recommendations from DB")
 def get_all_results(db: Session = Depends(get_db)):
     try:
-        results = db.query(PolicyRecommendation).all()
-        return results
+        # Επιστρέφει όλα τα αποτελέσματα από τον πίνακα
+        return db.query(PolicyRecommendation).all()
     except Exception as e:
-        # Πιθανόν ο πίνακας να μην υπάρχει ακόμα
-        return {"message": "No results found (Table might not exist yet). Run POST first.", "error": str(e)}
+        return {"message": "No results yet or table missing.", "error": str(e)}
 
 
 @router.get("/policy/results/{country}", summary="Get policy recommendations for specific country")
 def get_country_result(country: str, db: Session = Depends(get_db)):
-    try:
-        result = db.query(PolicyRecommendation).filter(PolicyRecommendation.country.ilike(country)).first()
-        if not result:
-            raise HTTPException(status_code=404, detail="Country not found in analysis results")
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error (Run analysis first): {str(e)}")
+    # Αναζήτηση βάσει χώρας (Case Insensitive με ilike)
+    res = db.query(PolicyRecommendation).filter(PolicyRecommendation.country.ilike(country)).first()
+    if not res:
+        raise HTTPException(status_code=404, detail=f"No recommendations found for country: {country}")
+    return res
