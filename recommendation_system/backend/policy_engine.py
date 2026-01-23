@@ -6,15 +6,16 @@ import mysql.connector
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-# 1. Κάνουμε Import το DB_CONFIG από το κεντρικό config.py
+# 1. Προσπάθεια Import του DB_CONFIG
+# Αν αποτύχει, φτιάχνουμε εμείς το config με σωστά defaults για Docker
 try:
     from config import DB_CONFIG
 except ImportError:
-    # Fallback για development αν τρέχεις το αρχείο μεμονωμένα
     import os
 
+    # ΔΙΟΡΘΩΣΗ: Το default host είναι το όνομα του container της βάσης
     DB_CONFIG = {
-        "host": os.getenv("DB_HOST", "localhost"),
+        "host": os.getenv("DB_HOST", "mysql-curriculum-skill"),
         "port": int(os.getenv("DB_PORT", 3306)),
         "user": os.getenv("DB_USER", "root"),
         "password": os.getenv("DB_PASSWORD", "root"),
@@ -54,9 +55,6 @@ class EducationRecommendationSystem:
             return []
 
     def get_required_skills(self, occupation_titles: List[str], min_val: float = 0.7) -> Dict[str, List[str]]:
-        """
-        Καλεί το Service 2 (Required Skills) - Εξωτερικό API.
-        """
         occupation_skills = {}
         # Slice για ταχύτητα (π.χ. 30).
         for occupation in occupation_titles[:30]:
@@ -83,16 +81,13 @@ class EducationRecommendationSystem:
         return occupation_skills
 
     def get_all_countries_skills(self) -> Dict[str, List[str]]:
-        """
-        Τραβάει από τη βάση (MySQL) όλα τα skills ανά χώρα χρησιμοποιώντας το DB_CONFIG.
-        """
         results = {}
         conn = None
         try:
+            # Σύνδεση με το διορθωμένο DB_CONFIG
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor(dictionary=True)
 
-            # Το query βασίζεται στο σχήμα που μου έστειλες (skillcrawl.sql)
             query = """
                 SELECT u.country, s.skill_name
                 FROM Skill s
@@ -123,20 +118,13 @@ class EducationRecommendationSystem:
         return results
 
     def get_courses_from_other_countries(self, skills: List[str], current_country: str) -> Dict[str, List[str]]:
-        """
-        Βρίσκει μαθήματα για τα skills, ΑΠΟΚΛΕΙΟΝΤΑΣ την τρέχουσα χώρα μέσω SQL.
-        Επιστρέφει: 'Μάθημα (Πανεπιστήμιο) - [Χώρα]'
-        """
         skill_courses = {}
         conn = None
         try:
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor(dictionary=True)
 
-            # Παίρνουμε δείγμα skills για ταχύτητα
             for skill in skills[:20]:
-                # SQL QUERY: Φέρε μαθήματα που έχουν αυτό το skill
-                # ΚΑΙ η χώρα του πανεπιστημίου ΔΕΝ είναι η 'current_country'
                 query = """
                     SELECT c.lesson_name, u.university_name, u.country
                     FROM Skill s
@@ -174,9 +162,6 @@ class EducationRecommendationSystem:
         return skill_courses
 
     def run_analysis(self, skill_threshold: float = 0.7) -> Dict[str, Any]:
-        """
-        Κεντρική συνάρτηση εκτέλεσης.
-        """
         occupations = self.load_occupation_titles_from_csv()
         if not occupations:
             return {"error": "No occupations found"}
@@ -191,7 +176,6 @@ class EducationRecommendationSystem:
 
         for country, c_skills in country_data.items():
             logger.info(f"Analyzing country: {country}")
-
             all_req = set()
             for s_list in req_skills.values():
                 all_req.update(s_list)
