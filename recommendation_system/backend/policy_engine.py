@@ -5,22 +5,16 @@ import logging
 import mysql.connector
 from typing import List, Dict, Any
 from dataclasses import dataclass
+from dotenv import load_dotenv
 
-# 1. Προσπάθεια Import του DB_CONFIG
-# Αν αποτύχει, φτιάχνουμε εμείς το config με σωστά defaults για Docker
-try:
-    from config import DB_CONFIG
-except ImportError:
-    import os
-
-    # ΔΙΟΡΘΩΣΗ: Το default host είναι το όνομα του container της βάσης
-    DB_CONFIG = {
-        "host": os.getenv("DB_HOST", "mysql-curriculum-skill"),
-        "port": int(os.getenv("DB_PORT", 3306)),
-        "user": os.getenv("DB_USER", "root"),
-        "password": os.getenv("DB_PASSWORD", "root"),
-        "database": os.getenv("DB_NAME", "skillcrawl"),
-    }
+load_dotenv()
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "mysql-curriculum-skill"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "root"),
+    "database": os.getenv("DB_NAME", "skillcrawl"),
+}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -196,5 +190,6 @@ class EducationRecommendationSystem:
                 "missing_departments": missing_depts,
                 "missing_courses": missing_courses
             }
+
 
         return final_results
