@@ -24,7 +24,7 @@ services:
       timeout: 3s
       retries: 10
 
-  fastapi-service:
+  curriculum-skills:
     depends_on:
       mysql-curriculum-skill:
         condition: service_healthy
@@ -34,9 +34,8 @@ services:
     ports:
       - "5002:8000"
     volumes:
-      - ./curriculum:/app/curriculum
-      - ./crawler_json:/app/crawler_json
-      - ./world_universities_and_domains.json:/mnt/data/world_universities_and_domains.json:ro
+      - curriculum-curriculum:/app/curriculum
+      - curriculum-crawler_json:/app/crawler_json
     env_file:
       - .env
     environment:
@@ -60,5 +59,11 @@ services:
 
 volumes:
   curriculum-skills_mysql:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+  curriculum-curriculum:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+  curriculum-crawler_json:
     labels:
       io.portainer.accesscontrol.teams: skillab-all

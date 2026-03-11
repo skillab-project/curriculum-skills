@@ -2,7 +2,7 @@ import os
 import re
 import json
 
-UNIS_PATH = os.getenv("UNIS_JSON_PATH", "/mnt/data/world_universities_and_domains.json")
+UNIS_PATH = os.getenv("UNIS_JSON_PATH", "/app/world_universities_and_domains.json")
 _UNI_DATA = None
 _NAME_INDEX = None
 
