@@ -165,7 +165,7 @@ def call_curriculnlp_on_text(full_text: str, max_chars=40000, chunk_size=2000, o
 
 WORLD_UNI_PATH = os.environ.get(
     "WORLD_UNI_PATH",
-    "/mnt/data/world_universities_and_domains.json"
+    "/app/world_universities_and_domains.json"
 )
 _world_uni_index: Optional[List[Dict]] = None
 
