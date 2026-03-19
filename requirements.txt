@@ -21,3 +21,4 @@ pymysql
 pandas
 jupyter
 matplotlib
+cryptography

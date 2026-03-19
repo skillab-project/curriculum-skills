@@ -16,10 +16,16 @@ from cleaner import clean_file, iter_json_files
 
 try:
     import orjson as _jsonlib
-    def _json_load(f): return _jsonlib.loads(f.read())
+
+
+    def _json_load(f):
+        return _jsonlib.loads(f.read())
 except Exception:
     import json as _jsonlib
-    def _json_load(f): return _jsonlib.load(f)
+
+
+    def _json_load(f):
+        return _jsonlib.load(f)
 
 import logging
 import asyncio
@@ -32,6 +38,7 @@ import shutil
 import time
 import glob
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from crawler import run_apify_crawler
@@ -76,7 +83,7 @@ from output import (
     _find_uni_by_name,
     _load_universities
 )
-from config import DB_CONFIG 
+from config import DB_CONFIG
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -85,17 +92,14 @@ from datetime import datetime
 from recommendation_system.backend.routers.electives import router as electives_router
 from recommendation_system.backend.routers.filters import router as filters_router
 from recommendation_system.backend.routers.recommendations import router as recommendations_router
-from recommendation_system.backend.routers.policy import router as policy_router
-
+from policy import router as policy_router
 
 logger = logging.getLogger("db_saver")
-
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 
 TASKS: Dict[str, Dict[str, Any]] = globals().get("TASKS", {})
 globals()["TASKS"] = TASKS
@@ -108,6 +112,7 @@ CURRICUNLP_BASES = [
     "https://marfoli-curriculnlp.hf.space",
     "https://huggingface.co/spaces/marfoli/CurricuNLP",
 ]
+
 
 def _parse_gradio_response(out) -> List[Dict]:
     if isinstance(out, list):
@@ -137,6 +142,7 @@ def _parse_gradio_response(out) -> List[Dict]:
             return data
     return []
 
+
 def call_curriculnlp_on_text(full_text: str, max_chars=40000, chunk_size=2000, overlap=250, pause=0.2, retries=2):
     client = Client("marfoli/CurricuNLP")
     chunks = _chunk_text(_clean_pdf_text(full_text), chunk_size=chunk_size, overlap=overlap, limit=max_chars)
@@ -159,9 +165,10 @@ def call_curriculnlp_on_text(full_text: str, max_chars=40000, chunk_size=2000, o
 
 WORLD_UNI_PATH = os.environ.get(
     "WORLD_UNI_PATH",
-    "/app/world_universities_and_domains.json"
+    "/mnt/data/world_universities_and_domains.json"
 )
 _world_uni_index: Optional[List[Dict]] = None
+
 
 def _load_world_universities() -> List[Dict]:
     global _world_uni_index
@@ -173,6 +180,7 @@ def _load_world_universities() -> List[Dict]:
             print(f"[WARN] Could not load {WORLD_UNI_PATH}: {e}")
             _world_uni_index = []
     return _world_uni_index
+
 
 def _find_uni_by_name(name: str) -> Dict[str, Optional[str]]:
     items = _load_world_universities()
@@ -188,6 +196,7 @@ def _find_uni_by_name(name: str) -> Dict[str, Optional[str]]:
     domains = it.get("domains") or []
     primary_domain = (domains[0] if domains else None)
     return {"name": it.get("name"), "country": it.get("country"), "domain": primary_domain}
+
 
 JOIN_SKILL_ON_COURSE = """
 FROM Skill s
@@ -231,6 +240,7 @@ app.include_router(
     tags=["Education Policy"]
 )
 
+
 class DebugPDFRequest(BaseModel):
     pdf_name: str
     run_ner: bool = False
@@ -242,19 +252,24 @@ class DebugPDFRequest(BaseModel):
     max_chars: int = 40000
     sample_chars: int = 600
 
+
 class Organization(BaseModel):
     name: str
     location: str
-    
+
+
 class LabelItem(BaseModel):
-    class_or_confidence: str = Field(..., description="NER label name (e.g., 'lesson_name', 'ects', 'language', 'professor').")
+    class_or_confidence: str = Field(...,
+                                     description="NER label name (e.g., 'lesson_name', 'ects', 'language', 'professor').")
     token: str = Field(..., description="Extracted text value for the label.")
     confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Optional model confidence in [0,1].")
+
 
 class CourseLabels(BaseModel):
     lesson_name: Optional[str] = Field(None, description="Course/lesson title, if known.")
     website: Optional[AnyUrl] = Field(None, description="Canonical course URL.")
     labels: List[LabelItem] = Field(default_factory=list, description="CurricuNLP output for this course/page.")
+
 
 class SaveLabelsRequest(BaseModel):
     university_name: str = Field(..., description="Normalized university name.")
@@ -309,6 +324,7 @@ class CleanRequest(BaseModel):
             }
         }
 
+
 class FileSummary(BaseModel):
     file: str
     original_count: int
@@ -316,11 +332,13 @@ class FileSummary(BaseModel):
     removed_count: int
     removed_examples: List[str]
 
+
 class CleanTotals(BaseModel):
     files: int
     titles_before: int
     titles_after: int
     removed: int
+
 
 class CleanResponse(BaseModel):
     totals: CleanTotals
@@ -329,8 +347,11 @@ class CleanResponse(BaseModel):
 
 
 class SaveJSONRequest(BaseModel):
-    payload: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary JSON to store (must contain 'university_name' unless normalize_university=true).")
-    normalize_university: bool = Field(False, description="If true, try to fill university_name/country from a guessed name via _find_uni_by_name().")
+    payload: Dict[str, Any] = Field(default_factory=dict,
+                                    description="Arbitrary JSON to store (must contain 'university_name' unless normalize_university=true).")
+    normalize_university: bool = Field(False,
+                                       description="If true, try to fill university_name/country from a guessed name via _find_uni_by_name().")
+
 
 class ExportItem(BaseModel):
     id: List[int]
@@ -341,6 +362,7 @@ class ExportItem(BaseModel):
     upload_date: List[str]
     organization: Organization
 
+
 class ExportResponse(BaseModel):
     items: List[ExportItem]
 
@@ -350,44 +372,54 @@ class LabelItem(BaseModel):
     token: str = Field(..., description="Extracted value for the label")
     confidence: Optional[float] = Field(None, ge=0, le=1, description="Optional confidence")
 
+
 class CourseLabels(BaseModel):
     lesson_name: Optional[str] = Field(None, description="Course title, if known")
     website: Optional[AnyUrl] = Field(None, description="Canonical course URL")
     labels: List[LabelItem] = Field(default_factory=list, description="CurricuNLP output for this course/page")
+
 
 class SaveLabelsRequest(BaseModel):
     university_name: str = Field(..., description="Normalized university name")
     country: Optional[str] = Field(None, description="Country name")
     courses: List[CourseLabels] = Field(default_factory=list, description="Courses with label arrays")
 
+
 class CountryUniversities(BaseModel):
     country: str
     universities: int
+
 
 class SkillPerCountry(BaseModel):
     skill: str
     frequency: int
 
+
 class SkillsByCountry(BaseModel):
     country: str
     skills: List[SkillPerCountry]
+
 
 class MonthlyTrend(BaseModel):
     month: str
     count: int
 
+
 class ApifyCrawlRequest(BaseModel):
     start_urls: List[str]
+
 
 class CountryTrend(BaseModel):
     country: str
     monthly_counts: List[MonthlyTrend]
-    
+
+
 class SaveJSONDirRequest(BaseModel):
     directory: str = Field(..., description="Directory containing JSON files to import")
     filename_pattern: str = Field("*.json", description="Glob pattern for files (e.g. *.json)")
     recursive: bool = Field(False, description="Recurse into subdirectories")
-    normalize_university: bool = Field(True, description="Fill university_name/country via _find_uni_by_name if possible")
+    normalize_university: bool = Field(True,
+                                       description="Fill university_name/country via _find_uni_by_name if possible")
     stop_on_error: bool = Field(False, description="Stop at first error (default: continue)")
     limit: Optional[int] = Field(None, ge=1, description="Import at most this many files")
     dry_run: bool = Field(False, description="Validate and preview only; do not write to DB")
@@ -400,37 +432,47 @@ class CurricuNLPTextRequest(BaseModel):
     text: str
     max_chars: Optional[int] = 40000
 
+
 class ClusterResult(BaseModel):
     cluster: int
     universities: List[Dict[str, object]]
+
 
 class SkillFrequency(BaseModel):
     skill: str
     frequency: int
 
+
 class CrawlRequest(BaseModel):
     url: str
+
 
 class SkillListRequest(BaseModel):
     skills: List[str]
 
+
 class PDFProcessingRequest(BaseModel):
     pdf_name: str
+
 
 class SkillSearchRequest(BaseModel):
     skill: str
     university: str = None
 
+
 class SkillSearchURLRequest(BaseModel):
     skill_url: str
     university: str = None
+
 
 class LessonRequest(BaseModel):
     university_name: str
     lesson_name: str
 
+
 class TopSkillsAllRequest(BaseModel):
     top_n: Optional[int] = 20
+
 
 class TopSkillsRequest(BaseModel):
     university_name: str
@@ -446,9 +488,9 @@ def _parse_one_file_for_save_json_dir(fp: str, base_dir: str, normalize_universi
     file_base_hint = os.path.splitext(os.path.basename(fp))[0]
     if isinstance(payload, dict):
         uni_guess = (
-            payload.get("university_name")
-            or payload.get("university")
-            or (payload.get("university_meta") or {}).get("name")
+                payload.get("university_name")
+                or payload.get("university")
+                or (payload.get("university_meta") or {}).get("name")
         )
     else:
         uni_guess = None
@@ -457,40 +499,45 @@ def _parse_one_file_for_save_json_dir(fp: str, base_dir: str, normalize_universi
 
     if normalize_university:
         meta = _find_uni_by_name(uni_guess)
-        uni_name = (payload.get("university_name") if isinstance(payload, dict) else None) or meta.get("name") or uni_guess
+        uni_name = (payload.get("university_name") if isinstance(payload, dict) else None) or meta.get(
+            "name") or uni_guess
         country = (
-            (payload.get("country") if isinstance(payload, dict) else None)
-            or (payload.get("university_country") if isinstance(payload, dict) else None)
-            or meta.get("country")
-            or "Unknown"
+                (payload.get("country") if isinstance(payload, dict) else None)
+                or (payload.get("university_country") if isinstance(payload, dict) else None)
+                or meta.get("country")
+                or "Unknown"
         )
     else:
         meta = {"name": uni_guess, "country": (payload.get("country") if isinstance(payload, dict) else None)}
         uni_name = (payload.get("university_name") if isinstance(payload, dict) else None) or uni_guess
-        country  = (payload.get("country") if isinstance(payload, dict) else None) or "Unknown"
+        country = (payload.get("country") if isinstance(payload, dict) else None) or "Unknown"
 
     if isinstance(payload, dict) and isinstance(payload.get("courses"), list) and payload["courses"]:
         courses = payload["courses"]
-        source  = "payload.courses"
+        source = "payload.courses"
     else:
         flat_course = None
         if isinstance(payload, dict) and isinstance(payload.get("labels"), list):
             flat_course = _course_from_curriculnlp_labels_payload(payload, filename_hint=file_base_hint)
             source = "labels->course"
-        elif isinstance(payload, list) and payload and all(isinstance(x, dict) and "class_or_confidence" in x for x in payload):
+        elif isinstance(payload, list) and payload and all(
+                isinstance(x, dict) and "class_or_confidence" in x for x in payload):
             flat_course = _course_from_curriculnlp_labels_payload({"labels": payload}, filename_hint=file_base_hint)
             source = "labels(list)->course"
         elif isinstance(payload, dict):
             course_like = {
-                "lesson_name","title","name","website","url","description","objectives","learning_outcomes",
-                "course_content","assessment","exam","prerequisites","general_competences","educational_material",
-                "ects","language","professor","professors","hours","msc_bsc","msc_bsc_list","degree_title","degree_titles",
-                "semester_number","semester_label","mand_opt","fee_list","extras","year","attendance_type","attendence_type"
+                "lesson_name", "title", "name", "website", "url", "description", "objectives", "learning_outcomes",
+                "course_content", "assessment", "exam", "prerequisites", "general_competences", "educational_material",
+                "ects", "language", "professor", "professors", "hours", "msc_bsc", "msc_bsc_list", "degree_title",
+                "degree_titles",
+                "semester_number", "semester_label", "mand_opt", "fee_list", "extras", "year", "attendance_type",
+                "attendence_type"
             }
             if course_like & set(payload.keys()):
                 flat_course = dict(payload)
                 if not isinstance(flat_course.get("lesson_name"), str) or not flat_course["lesson_name"].strip():
-                    flat_course["lesson_name"] = (flat_course.get("title") or flat_course.get("name") or file_base_hint or "Untitled Course")[:255]
+                    flat_course["lesson_name"] = (flat_course.get("title") or flat_course.get(
+                        "name") or file_base_hint or "Untitled Course")[:255]
                 if not flat_course.get("website") and flat_course.get("url"):
                     flat_course["website"] = flat_course["url"]
                 if flat_course.get("attendence_type") and not flat_course.get("attendance_type"):
@@ -516,6 +563,7 @@ def _parse_one_file_for_save_json_dir(fp: str, base_dir: str, normalize_universi
 
 def _save_json_dir_task(task_id: str, req_data: dict):
     task = TASKS.get(task_id, {})
+
     def set_status(**kw):
         task.update(kw)
         TASKS[task_id] = task
@@ -531,10 +579,10 @@ def _save_json_dir_task(task_id: str, req_data: dict):
         if not os.path.isdir(base_dir):
             raise FileNotFoundError(f"Directory not found: {base_dir}")
 
-        pattern   = req_data.get("filename_pattern") or "*.json"
+        pattern = req_data.get("filename_pattern") or "*.json"
         recursive = bool(req_data.get("recursive"))
-        glob_pat  = os.path.join(base_dir, "**", pattern) if recursive else os.path.join(base_dir, pattern)
-        files     = [f for f in glob.glob(glob_pat, recursive=recursive) if os.path.isfile(f)]
+        glob_pat = os.path.join(base_dir, "**", pattern) if recursive else os.path.join(base_dir, pattern)
+        files = [f for f in glob.glob(glob_pat, recursive=recursive) if os.path.isfile(f)]
         files.sort()
         if req_data.get("limit"):
             files = files[: int(req_data["limit"])]
@@ -549,10 +597,10 @@ def _save_json_dir_task(task_id: str, req_data: dict):
             return
 
         normalize_university = bool(req_data.get("normalize_university"))
-        stop_on_error        = bool(req_data.get("stop_on_error"))
-        use_process_pool     = bool(req_data.get("use_process_pool"))
-        workers              = int(req_data.get("workers") or max(2, (os.cpu_count() or 4)))
-        db_workers           = int(req_data.get("db_workers") or 2)
+        stop_on_error = bool(req_data.get("stop_on_error"))
+        use_process_pool = bool(req_data.get("use_process_pool"))
+        workers = int(req_data.get("workers") or max(2, (os.cpu_count() or 4)))
+        db_workers = int(req_data.get("db_workers") or 2)
 
         parse_fn = partial(
             _parse_one_file_for_save_json_dir,
@@ -589,7 +637,7 @@ def _save_json_dir_task(task_id: str, req_data: dict):
         with Executor(max_workers=workers) as ex:
             futures = {ex.submit(parse_fn, fp): fp for fp in files}
             for fut in as_completed(futures):
-                fp  = futures[fut]
+                fp = futures[fut]
                 rel = os.path.relpath(fp, base_dir)
                 try:
                     res = fut.result()
@@ -634,8 +682,6 @@ def _save_json_dir_task(task_id: str, req_data: dict):
         logger.exception("[%s] Task crashed: %s", task_id, e)
 
 
-
-
 def get_tracker_token() -> str:
     login_url = f"{os.environ['API_TRACKER_BASE_URL']}/login"
     payload = {"username": os.getenv("TRACKER_USERNAME"), "password": os.getenv("TRACKER_PASSWORD")}
@@ -648,7 +694,8 @@ def get_tracker_token() -> str:
     except Exception as e:
         print(f"[ERROR] Login failed: {e}")
         return ""
-        
+
+
 def _save_payload_task(task_id: str, payload: dict):
     task = TASKS.get(task_id)
     if not task:
@@ -675,6 +722,7 @@ def _save_payload_task(task_id: str, payload: dict):
 def health_check():
     return {"status": "running"}
 
+
 @app.post("/nlp/curriculnlp", tags=["CurricuNLP"], summary="Run CurricuNLP on raw text and return labels")
 def curriculnlp_labels(req: CurricuNLPTextRequest):
     text = (req.text or "").strip()
@@ -686,7 +734,6 @@ def curriculnlp_labels(req: CurricuNLPTextRequest):
         return {"labels": labels}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"CurricuNLP call failed: {e}")
-
 
 
 @app.post("/crawl/start", tags=["CurricuNLP"], status_code=202)
@@ -705,10 +752,12 @@ async def start_apify_crawl(request: ApifyCrawlRequest, background_tasks: Backgr
         "started_urls": request.start_urls
     }
 
+
 @app.post("/import/crawler_json", tags=["CurricuNLP"], summary="Import crawler JSON file(s) into the database")
 def import_crawler_json(
-    directory: str = Query("crawler_json", description="Directory containing crawler JSON files"),
-    filename: Optional[str] = Query(None, description="Specific JSON file to import. If omitted, imports ALL *.json in directory")
+        directory: str = Query("crawler_json", description="Directory containing crawler JSON files"),
+        filename: Optional[str] = Query(None,
+                                        description="Specific JSON file to import. If omitted, imports ALL *.json in directory")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -721,18 +770,20 @@ def import_crawler_json(
             return {"file": os.path.basename(path), "status": "error", "error": f"Failed to read JSON: {e}"}
 
         uni_guess = (
-            payload.get("university_name")
-            or payload.get("university")
-            or (payload.get("university_meta") or {}).get("name")
-            or re.sub(r"[_\W]+", " ", os.path.splitext(os.path.basename(path))[0]).strip()
+                payload.get("university_name")
+                or payload.get("university")
+                or (payload.get("university_meta") or {}).get("name")
+                or re.sub(r"[_\W]+", " ", os.path.splitext(os.path.basename(path))[0]).strip()
         )
         meta = _find_uni_by_name(uni_guess)
         payload["university_name"] = payload.get("university_name") or meta.get("name") or uni_guess
-        payload["country"] = payload.get("country") or payload.get("university_country") or meta.get("country") or "Unknown"
+        payload["country"] = payload.get("country") or payload.get("university_country") or meta.get(
+            "country") or "Unknown"
 
         try:
             write_json_to_database(payload, DB_CONFIG)
-            return {"file": os.path.basename(path), "status": "imported", "university": payload["university_name"], "country": payload["country"]}
+            return {"file": os.path.basename(path), "status": "imported", "university": payload["university_name"],
+                    "country": payload["country"]}
         except Exception as e:
             return {"file": os.path.basename(path), "status": "error", "error": str(e)}
 
@@ -759,8 +810,6 @@ def import_crawler_json(
     ok = [r for r in results if r["status"] == "imported"]
     errs = [r for r in results if r["status"] == "error"]
     return {"imported": ok, "errors": errs, "count": {"success": len(ok), "failed": len(errs)}}
-    
-    
 
 
 @app.get("/debug_one_skill", tags=["Debug"])
@@ -779,8 +828,8 @@ def debug_one():
 
 @app.post("/crawl/run_and_import", tags=["CurricuNLP"], summary="Run Apify crawler, then import its JSON outputs")
 async def run_and_import(
-    request: ApifyCrawlRequest,
-    outdir: str = Query("crawler_json", description="Directory where crawler writes JSONs")
+        request: ApifyCrawlRequest,
+        outdir: str = Query("crawler_json", description="Directory where crawler writes JSONs")
 ):
     if not request.start_urls:
         raise HTTPException(status_code=400, detail="start_urls list cannot be empty.")
@@ -795,14 +844,15 @@ async def run_and_import(
             with open(fp, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             uni_guess = (
-                payload.get("university_name")
-                or payload.get("university")
-                or (payload.get("university_meta") or {}).get("name")
-                or os.path.splitext(os.path.basename(fp))[0]
+                    payload.get("university_name")
+                    or payload.get("university")
+                    or (payload.get("university_meta") or {}).get("name")
+                    or os.path.splitext(os.path.basename(fp))[0]
             )
             meta = _find_uni_by_name(uni_guess)
             payload["university_name"] = payload.get("university_name") or meta.get("name") or uni_guess
-            payload["country"] = payload.get("country") or payload.get("university_country") or meta.get("country") or "Unknown"
+            payload["country"] = payload.get("country") or payload.get("university_country") or meta.get(
+                "country") or "Unknown"
 
             write_json_to_database(payload, DB_CONFIG)
             ok.append({"file": os.path.basename(fp), "status": "imported"})
@@ -828,8 +878,6 @@ def list_pdfs():
                 "domain": meta.get("domain")
             })
     return {"pdf_files": pdf_files}
-
-
 
 
 @app.post("/process_pdf", tags=["PDF"])
@@ -861,12 +909,11 @@ def process_pdf(request: PDFProcessingRequest):
     }
 
 
-
 @app.get("/filter_skillnames", tags=["Skills"])
 def get_skills_endpoint(
-    university_name: str = Query(..., description="University name"),
-    lesson_name: str = Query(..., description="Lesson name"),
-    match: Literal["exact", "like", "prefix"] = Query("exact", description="Match mode: exact | like | prefix")
+        university_name: str = Query(..., description="University name"),
+        lesson_name: str = Query(..., description="Lesson name"),
+        match: Literal["exact", "like", "prefix"] = Query("exact", description="Match mode: exact | like | prefix")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -909,8 +956,8 @@ def get_skills_endpoint(
             conn.close()
         except Exception:
             pass
-            
-            
+
+
 @app.get("/db/tasks/{task_id}", tags=["Debug"])
 def get_task_status(task_id: str):
     task = TASKS.get(task_id)
@@ -930,6 +977,7 @@ FIELD_TO_CATEGORY_DEFAULT = [
     ("general_competences", "general_competences"),
     ("educational_material", "educational_material"),
 ]
+
 
 def _extract_urls_for_course(course: dict, field_to_category=FIELD_TO_CATEGORY_DEFAULT) -> tuple:
     """
@@ -979,6 +1027,7 @@ def _extract_urls_for_course(course: dict, field_to_category=FIELD_TO_CATEGORY_D
 
     return cid, title, url_to_categories
 
+
 def _resolve_urls_to_names(all_urls: Set[str], token: str) -> Dict[str, dict]:
     """
     Batch-resolve URLs -> {label, esco_id, level} using the tracker API.
@@ -1024,13 +1073,12 @@ def _resolve_urls_to_names(all_urls: Set[str], token: str) -> Dict[str, dict]:
         return {}
 
 
-
 def _db_write_course_skills(
-    course_id: int,
-    url_to_categories: Dict[str, Set[str]],
-    url_meta: Dict[str, dict],
-    level_min: Optional[int] = None,
-    level_max: Optional[int] = None,
+        course_id: int,
+        url_to_categories: Dict[str, Set[str]],
+        url_meta: Dict[str, dict],
+        level_min: Optional[int] = None,
+        level_max: Optional[int] = None,
 ) -> List[str]:
     """
     Opens its own DB connection, upserts skills for one course, closes connection.
@@ -1079,15 +1127,16 @@ def _db_write_course_skills(
 
 
 def _calc_all_skillnames_task_parallel(
-    master_task_id: str,
-    lesson_name: Optional[str],
-    match: Literal["exact","like"],
-    workers: int,
-    min_skill_level: Optional[int] = None,
-    max_skill_level: Optional[int] = None
+        master_task_id: str,
+        lesson_name: Optional[str],
+        match: Literal["exact", "like"],
+        workers: int,
+        min_skill_level: Optional[int] = None,
+        max_skill_level: Optional[int] = None
 ):
     task = TASKS.get(master_task_id, {})
     lock = Lock()
+
     def set_status(**kw):
         with lock:
             task.update(kw)
@@ -1130,7 +1179,6 @@ def _calc_all_skillnames_task_parallel(
             subtasks_info.append({"task_id": sub_id, "university": uni})
 
         set_status(subtasks=subtasks_info)
-
 
         processed = 0
         succeeded, failed = [], []
@@ -1186,15 +1234,17 @@ def _calc_all_skillnames_task_parallel(
         except Exception:
             pass
 
-@app.post("/calculate_skillnames", tags=["Skills"], summary="Extract and upsert skills (background task)", status_code=202)
+
+@app.post("/calculate_skillnames", tags=["Skills"], summary="Extract and upsert skills (background task)",
+          status_code=202)
 def calculate_skillnames(
-    university_name: Optional[str] = "",
-    lesson_name: Optional[str] = None,
-    match: Literal["exact","like"] = "like",
-    workers: int = 8,
-    min_skill_level: Optional[int] = Query(None, description="Minimum skill level (ESCO level)"),
-    max_skill_level: Optional[int] = Query(None, description="Maximum skill level (ESCO level)"),
-    background_tasks: BackgroundTasks = None
+        university_name: Optional[str] = "",
+        lesson_name: Optional[str] = None,
+        match: Literal["exact", "like"] = "like",
+        workers: int = 8,
+        min_skill_level: Optional[int] = Query(None, description="Minimum skill level (ESCO level)"),
+        max_skill_level: Optional[int] = Query(None, description="Maximum skill level (ESCO level)"),
+        background_tasks: BackgroundTasks = None
 ):
     """
     (Optionally) filter by ESCO skill level.  Passing min_skill_level / max_skill_level
@@ -1262,9 +1312,9 @@ def calculate_skillnames(
     }
 
 
-
-def _calc_all_skillnames_task(master_task_id: str, lesson_name: Optional[str], match: Literal["exact","like"]):
+def _calc_all_skillnames_task(master_task_id: str, lesson_name: Optional[str], match: Literal["exact", "like"]):
     task = TASKS.get(master_task_id, {})
+
     def set_status(**kw):
         task.update(kw)
         TASKS[master_task_id] = task
@@ -1348,13 +1398,14 @@ def _calc_all_skillnames_task(master_task_id: str, lesson_name: Optional[str], m
         except Exception:
             pass
 
+
 def _calc_skillnames_task(
-    task_id: str,
-    university_name: str,
-    lesson_name: Optional[str],
-    match: Literal["exact","like"],
-    min_skill_level: Optional[int] = None,
-    max_skill_level: Optional[int] = None
+        task_id: str,
+        university_name: str,
+        lesson_name: Optional[str],
+        match: Literal["exact", "like"],
+        min_skill_level: Optional[int] = None,
+        max_skill_level: Optional[int] = None
 ):
     task = TASKS.get(task_id, {})
 
@@ -1377,7 +1428,7 @@ def _calc_skillnames_task(
         return
 
     COURSE_WORKERS = int(os.getenv("SKILL_COURSE_WORKERS", "32"))
-    DB_WORKERS     = int(os.getenv("SKILL_DB_WORKERS", "6"))
+    DB_WORKERS = int(os.getenv("SKILL_DB_WORKERS", "6"))
 
     def _build_pred(col: str, mode: str) -> str:
         return f"LOWER({col}) = LOWER(%s)" if mode == "exact" else f"LOWER({col}) LIKE LOWER(%s)"
@@ -1394,7 +1445,8 @@ def _calc_skillnames_task(
         )
         row = cursor.fetchone()
         if not row:
-            set_status(status="failed", finished_at=time.time(), error=f"University not found in DB: '{university_name}'")
+            set_status(status="failed", finished_at=time.time(),
+                       error=f"University not found in DB: '{university_name}'")
             return
 
         university_id = row["university_id"]
@@ -1491,7 +1543,6 @@ def _calc_skillnames_task(
         conn.close()
 
 
-
 @app.post("/nlp/curriculnlp/debug", tags=["CurricuNLP", "Debug"])
 def curriculnlp_labels_debug(req: CurricuNLPTextRequest):
     out = CURRICU_CLIENT.predict(text=req.text, api_name="/predict")
@@ -1500,6 +1551,7 @@ def curriculnlp_labels_debug(req: CurricuNLPTextRequest):
         "labels_count": len(out) if isinstance(out, list) else 0,
         "labels_preview": out[:5] if isinstance(out, list) else []
     }
+
 
 @app.post("/debug_pdf", tags=["PDF", "Debug"])
 def debug_pdf(request: DebugPDFRequest):
@@ -1511,7 +1563,8 @@ def debug_pdf(request: DebugPDFRequest):
         pymu_text = " ".join(pages) if isinstance(pages, list) else str(pages or "")
         pymu_len = len(pymu_text.strip())
         page_count = len(pages) if isinstance(pages, list) else None
-        nonempty_pages = sum(1 for p in (pages or []) if isinstance(p, str) and p.strip()) if isinstance(pages, list) else None
+        nonempty_pages = sum(1 for p in (pages or []) if isinstance(p, str) and p.strip()) if isinstance(pages,
+                                                                                                         list) else None
     except Exception:
         pymu_text, pymu_len, page_count, nonempty_pages = "", 0, None, None
 
@@ -1601,10 +1654,11 @@ def debug_pdf(request: DebugPDFRequest):
         "label_counts": label_counts
     }
 
+
 @app.get("/search_skill", tags=["Queries"])
 def search_skill(
-    skill: str = Query(..., description="Skill name"),
-    university: Optional[str] = Query(None, description="University name (optional, LIKE search)")
+        skill: str = Query(..., description="Skill name"),
+        university: Optional[str] = Query(None, description="University name (optional, LIKE search)")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1643,7 +1697,8 @@ def search_skill(
     finally:
         cursor.close()
         conn.close()
-        
+
+
 @app.post(
     "/db/save_json_dir",
     tags=["Database"],
@@ -1718,10 +1773,11 @@ def save_json_dir_to_db(req: SaveJSONDirRequest, background_tasks: BackgroundTas
         "note": "Poll /db/tasks/{task_id} for progress and results."
     }
 
+
 @app.get("/search_skill_by_URL", tags=["Queries"])
 def search_skill_by_url(
-    skill_url: str = Query(..., description="Exact or partial Skill URL"),
-    university: Optional[str] = Query(None, description="University name (optional, LIKE search)")
+        skill_url: str = Query(..., description="Exact or partial Skill URL"),
+        university: Optional[str] = Query(None, description="University name (optional, LIKE search)")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1759,9 +1815,10 @@ def search_skill_by_url(
         cursor.close()
         conn.close()
 
+
 @app.get("/get_universities_by_skills", tags=["Queries"])
 def get_universities_by_skills(
-    skills: List[str] = Query(..., description="List of skills (names, partial match)")
+        skills: List[str] = Query(..., description="List of skills (names, partial match)")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1819,6 +1876,7 @@ def get_universities_by_skills(
             return full_coverage
 
         n_req = len(requested_set)
+
         def coverage(uni: str) -> float:
             return len(uni_to_present.get(uni, set())) / n_req if n_req else 0.0
 
@@ -1881,10 +1939,11 @@ def get_universities_by_skills(
         except Exception:
             pass
 
+
 @app.get("/get_top_skills", tags=["Queries"])
 def get_top_skills(
-    university_name: str = Query(..., description="University name (LIKE match)"),
-    top_n: int = Query(20, description="Number of top skills to return")
+        university_name: str = Query(..., description="University name (LIKE match)"),
+        top_n: int = Query(20, description="Number of top skills to return")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1911,9 +1970,10 @@ def get_top_skills(
         cursor.close()
         conn.close()
 
+
 @app.get("/get_top_skills_all", tags=["Queries"])
 def get_top_skills_all(
-    top_n: int = Query(20, description="Number of top skills to return")
+        top_n: int = Query(20, description="Number of top skills to return")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1947,10 +2007,11 @@ def get_top_skills_all(
         cursor.close()
         conn.close()
 
+
 @app.get("/course_skills_matrix", tags=["Bilateral"], summary="List of courses with Level-4 skill names")
 def course_skills_matrix(
-    page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+        page: int = Query(1, ge=1, description="Page number"),
+        per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
 ):
     """
     Returns a paginated list of courses with **Level-4 skill names** only
@@ -1985,8 +2046,8 @@ def course_skills_matrix(
 
 @app.get("/course_skill_urls_matrix", tags=["Bilateral"], summary="List of courses with Level-4 skill URLs")
 def course_skill_urls_matrix(
-    page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+        page: int = Query(1, ge=1, description="Page number"),
+        per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
 ):
     """
     Returns a paginated list of courses with **Level-4 ESCO skill URLs**
@@ -2017,7 +2078,6 @@ def course_skill_urls_matrix(
     finally:
         cursor.close()
         conn.close()
-
 
 
 @app.post(
@@ -2071,6 +2131,7 @@ def save_labels_to_db(req: SaveLabelsRequest, background_tasks: BackgroundTasks)
     TASKS[task_id] = {"status": "queued", "queued_at": time.time()}
     background_tasks.add_task(_save_payload_task, task_id, payload)
     return {"status": "queued", "task_id": task_id, "queued_courses": len(payload["courses"])}
+
 
 @app.post(
     "/db/save_json",
@@ -2128,17 +2189,19 @@ def save_json_to_db(req: SaveJSONRequest, background_tasks: BackgroundTasks):
     payload = dict(req.payload or {})
     if req.normalize_university:
         uni_guess = (
-            payload.get("university_name")
-            or payload.get("university")
-            or (payload.get("university_meta") or {}).get("name")
+                payload.get("university_name")
+                or payload.get("university")
+                or (payload.get("university_meta") or {}).get("name")
         )
         if uni_guess:
             meta = _find_uni_by_name(uni_guess)
             payload["university_name"] = payload.get("university_name") or meta.get("name") or uni_guess
-            payload["country"] = payload.get("country") or payload.get("university_country") or meta.get("country") or "Unknown"
+            payload["country"] = payload.get("country") or payload.get("university_country") or meta.get(
+                "country") or "Unknown"
 
     if not payload.get("university_name"):
-        raise HTTPException(status_code=400, detail="payload.university_name is required (or enable normalize_university).")
+        raise HTTPException(status_code=400,
+                            detail="payload.university_name is required (or enable normalize_university).")
 
     task_id = str(uuid4())
     TASKS[task_id] = {"status": "queued", "queued_at": time.time()}
@@ -2148,6 +2211,7 @@ def save_json_to_db(req: SaveJSONRequest, background_tasks: BackgroundTasks):
         "task_id": task_id,
         "queued_courses": len((payload or {}).get("courses", []))
     }
+
 
 @app.post("/clean-degrees", response_model=CleanResponse, tags=["Cleaning"])
 def clean_degrees(req: CleanRequest):
@@ -2191,7 +2255,8 @@ def clean_degrees(req: CleanRequest):
     )
 
 
-@app.get("/descriptive/location", response_model=List[CountryUniversities], tags=["Descriptive"], summary="Universities per Country from DB")
+@app.get("/descriptive/location", response_model=List[CountryUniversities], tags=["Descriptive"],
+         summary="Universities per Country from DB")
 def get_university_counts_by_country_db():
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2213,11 +2278,12 @@ def get_university_counts_by_country_db():
         cursor.close()
         conn.close()
 
+
 @app.post("/calculate_occupations", tags=["Skills"], status_code=202)
 def calculate_occupations(
-    university_name: Optional[str] = "",
-    lesson_name: Optional[str] = None,
-    background_tasks: BackgroundTasks = None
+        university_name: Optional[str] = "",
+        lesson_name: Optional[str] = None,
+        background_tasks: BackgroundTasks = None
 ):
     """
     Resolve occupations for all skills in the DB and store into Occupation + SkillOccupation.
@@ -2250,10 +2316,12 @@ def calculate_occupations(
         "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress."
     }
 
+
 def _calc_occupations_task(task_id: str,
                            university_name: Optional[str],
                            lesson_name: Optional[str]):
     task = TASKS.get(task_id, {})
+
     def set_status(**kw):
         task.update(kw)
         TASKS[task_id] = task
@@ -2301,10 +2369,10 @@ def _calc_occupations_task(task_id: str,
     token = get_tracker_token()
 
     def save_occ_to_db(skill_id: int, occ):
-        occ_id   = occ.get("id")
-        label    = occ.get("label")
-        parent   = occ.get("occupation_group")
-        sector   = occ.get("top_level_sector")
+        occ_id = occ.get("id")
+        label = occ.get("label")
+        parent = occ.get("occupation_group")
+        sector = occ.get("top_level_sector")
 
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
@@ -2321,7 +2389,8 @@ def _calc_occupations_task(task_id: str,
             """, (skill_id, occ_id))
             conn.commit()
         finally:
-            cursor.close(); conn.close()
+            cursor.close();
+            conn.close()
 
     processed = 0
     for row in skill_rows:
@@ -2360,16 +2429,19 @@ def _calc_occupations_task(task_id: str,
 
 
 from typing import List, Optional, Literal
+
+
 @app.get("/theme_search", tags=["Queries"])
 def theme_search(
-    theme: Optional[str] = Query(None, description="Single keyword (comma-separated allowed)"),
-    themes: Optional[List[str]] = Query(None, description="Repeatable multi-keyword param, e.g. ?themes=ai&themes=robotics"),
-    logic: Literal["any", "all"] = Query("any", description="Keyword combination logic"),
-    threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)"),
-    include_skills: bool = Query(True, description="Include skills for each matched course"),
-    skills_limit: int = Query(0, ge=0, description="Max skills per course (0 = unlimited)"),
-    page: int = Query(1, ge=1, description="Results page (1-based)"),
-    per_page: int = Query(25, ge=1, le=100, description="Results per page (max 100)")
+        theme: Optional[str] = Query(None, description="Single keyword (comma-separated allowed)"),
+        themes: Optional[List[str]] = Query(None,
+                                            description="Repeatable multi-keyword param, e.g. ?themes=ai&themes=robotics"),
+        logic: Literal["any", "all"] = Query("any", description="Keyword combination logic"),
+        threshold: int = Query(70, ge=0, le=100, description="Fuzzy matching threshold (0-100)"),
+        include_skills: bool = Query(True, description="Include skills for each matched course"),
+        skills_limit: int = Query(0, ge=0, description="Max skills per course (0 = unlimited)"),
+        page: int = Query(1, ge=1, description="Results page (1-based)"),
+        per_page: int = Query(25, ge=1, le=100, description="Results per page (max 100)")
 ):
     """
     Fuzzy semantic search over:
@@ -2424,7 +2496,8 @@ def theme_search(
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
         try:
-            cursor.close(); conn.close()
+            cursor.close();
+            conn.close()
         except Exception:
             pass
 
@@ -2439,7 +2512,7 @@ def theme_search(
     })
 
     for r in rows:
-        uni   = r["university_name"]
+        uni = r["university_name"]
         title = r["lesson_name"]
         if not title:
             continue
@@ -2539,7 +2612,8 @@ def theme_search(
     }
 
 
-@app.get("/exploratory/skills_location", response_model=List[SkillsByCountry], tags=["Exploratory"], summary="Skills per Country from DB")
+@app.get("/exploratory/skills_location", response_model=List[SkillsByCountry], tags=["Exploratory"],
+         summary="Skills per Country from DB")
 def get_skills_per_location_db():
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2565,7 +2639,9 @@ def get_skills_per_location_db():
         cursor.close()
         conn.close()
 
-@app.get("/trend/location", response_model=List[CountryTrend], tags=["Trend"], summary="University Join Trend per Country from DB")
+
+@app.get("/trend/location", response_model=List[CountryTrend], tags=["Trend"],
+         summary="University Join Trend per Country from DB")
 def get_university_trend_per_location_db():
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2591,15 +2667,16 @@ def get_university_trend_per_location_db():
         cursor.close()
         conn.close()
 
+
 @app.get(
     "/university/all",
     tags=["Queries"],
     summary="Full snapshot for a university (metadata, courses, skills)",
 )
 def get_university_full(
-    university_name: str = Query(..., description="University name (LIKE match)"),
-    page: int = Query(1, ge=1, description="Results page (1-based)"),
-    per_page: int = Query(25, ge=1, le=100, description="Courses per page (max 100)"),
+        university_name: str = Query(..., description="University name (LIKE match)"),
+        page: int = Query(1, ge=1, description="Results page (1-based)"),
+        per_page: int = Query(25, ge=1, le=100, description="Courses per page (max 100)"),
 ):
     """
     Returns a consolidated view for a university:
@@ -2746,7 +2823,8 @@ def get_university_full(
             pass
 
 
-@app.get("/cluster/universities/{k}", response_model=List[ClusterResult], tags=["Clustering"], summary="University Clustering by Skills from DB")
+@app.get("/cluster/universities/{k}", response_model=List[ClusterResult], tags=["Clustering"],
+         summary="University Clustering by Skills from DB")
 def cluster_universities_db(k: int):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2784,7 +2862,9 @@ def cluster_universities_db(k: int):
         cursor.close()
         conn.close()
 
-@app.get("/descriptive/skills_frequency", response_model=List[SkillFrequency], tags=["Descriptive"], summary="Skill frequency across courses from DB")
+
+@app.get("/descriptive/skills_frequency", response_model=List[SkillFrequency], tags=["Descriptive"],
+         summary="Skill frequency across courses from DB")
 def get_skill_frequencies():
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2808,10 +2888,12 @@ def get_skill_frequencies():
         cursor.close()
         conn.close()
 
-@app.get("/bilateral/biodiversity_analysis", tags=["Bilateral"], summary="Degree/Department biodiversity of Level-4 skills")
+
+@app.get("/bilateral/biodiversity_analysis", tags=["Bilateral"],
+         summary="Degree/Department biodiversity of Level-4 skills")
 def biodiversity_analysis(
-    page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
+        page: int = Query(1, ge=1, description="Page number"),
+        per_page: int = Query(10, ge=1, le=100, description="Results per page (max 100)")
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -2877,7 +2959,7 @@ def biodiversity_analysis(
 
             msc_list = [t for t in msc_list if isinstance(t, str) and t.strip()] or ["Other"]
             deg_titles_filtered = [t for t in deg_titles if isinstance(t, str) and t.strip()]
-            
+
             dept = infer_department(r.get("extras"), lesson_name, deg_titles_filtered) or "Unknown"
 
             deg_titles_for_loop = deg_titles_filtered or ["Unknown"]
@@ -2930,11 +3012,13 @@ def biodiversity_analysis(
         cursor.close()
         conn.close()
 
-@app.get("/bilateral/labor_market_export", response_model=ExportResponse, tags=["Bilateral"], summary="List of all degrees with their Level 4 skills")
+
+@app.get("/bilateral/labor_market_export", response_model=ExportResponse, tags=["Bilateral"],
+         summary="List of all degrees with their Level 4 skills")
 def labor_export_from_database(
-    university_name: str = Query(None, description="Optional university name to search for (LIKE)"),
-    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
-    limit: int = Query(100, ge=1, le=1000, description="Number of items per page")
+        university_name: str = Query(None, description="Optional university name to search for (LIKE)"),
+        page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+        limit: int = Query(100, ge=1, le=1000, description="Number of items per page")
 ):
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -2977,7 +3061,8 @@ def labor_export_from_database(
             lessons_data[key]["description"] = row.get("description", "") or ""
             lessons_data[key]["university"] = row["university_name"]
             lessons_data[key]["country"] = row["country"]
-            lessons_data[key]["upload_date"] = row["created_at"].strftime("%Y-%m-%d") if row.get("created_at") else datetime.today().strftime("%Y-%m-%d")
+            lessons_data[key]["upload_date"] = row["created_at"].strftime("%Y-%m-%d") if row.get(
+                "created_at") else datetime.today().strftime("%Y-%m-%d")
             if row["skill_url"]:
                 lessons_data[key]["skills"].append((row["skill_url"], row.get("skill_name", "")))
 
@@ -3051,12 +3136,13 @@ def labor_export_from_database(
             conn.close()
         except Exception:
             pass
-           
+
+
 @app.get("/lookup_skill_level", tags=["Skills"], summary="Get ESCO level for a given skill name")
 def lookup_skill_level(
-    skill_name: str = Query(..., description="Exact skill name"),
-    min_skill_level: Optional[int] = Query(None, ge=1, le=8),
-    max_skill_level: Optional[int] = Query(None, ge=1, le=8)
+        skill_name: str = Query(..., description="Exact skill name"),
+        min_skill_level: Optional[int] = Query(None, ge=1, le=8),
+        max_skill_level: Optional[int] = Query(None, ge=1, le=8)
 ):
     """
     Calls the tracker endpoint to retrieve the level of a skill.
@@ -3094,6 +3180,7 @@ def lookup_skill_level(
 
     return {"skill_name": skill_name, "level": None}
 
+
 @app.post(
     "/refresh_skill_levels",
     tags=["Skills"],
@@ -3101,10 +3188,10 @@ def lookup_skill_level(
     status_code=202,
 )
 def refresh_skill_levels(
-    min_skill_level: int = Query(1, ge=1, le=8, description="Minimum skill level to fetch from tracker"),
-    max_skill_level: int = Query(8, ge=1, le=8, description="Maximum skill level to fetch from tracker"),
-    workers: int = Query(8, ge=1, le=64, description="Number of parallel DB workers"),
-    background_tasks: BackgroundTasks = None,
+        min_skill_level: int = Query(1, ge=1, le=8, description="Minimum skill level to fetch from tracker"),
+        max_skill_level: int = Query(8, ge=1, le=8, description="Maximum skill level to fetch from tracker"),
+        workers: int = Query(8, ge=1, le=64, description="Number of parallel DB workers"),
+        background_tasks: BackgroundTasks = None,
 ):
     if not is_database_connected(DB_CONFIG):
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -3127,19 +3214,21 @@ def refresh_skill_levels(
     )
     return {"status": "queued", "task_id": task_id}
 
+
 def _update_missing_skill_levels_task(
-    task_id: str,
-    min_skill_level: int,
-    max_skill_level: int,
-    workers: int,
+        task_id: str,
+        min_skill_level: int,
+        max_skill_level: int,
+        workers: int,
 ):
     task = TASKS.get(task_id, {})
+
     def set_status(**kw):
         task.update(kw)
         TASKS[task_id] = task
 
     set_status(status="running", started_at=time.time(), updated=0, processed=0)
-    
+
     try:
         token = get_tracker_token()
         if not token:
@@ -3147,11 +3236,13 @@ def _update_missing_skill_levels_task(
             set_status(status="failed", finished_at=time.time(), error="Tracker token missing")
             return
 
-        db_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name=f"pool_{task_id}", pool_size=workers, **DB_CONFIG)
+        db_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name=f"pool_{task_id}", pool_size=workers,
+                                                              **DB_CONFIG)
 
         conn = db_pool.get_connection()
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT skill_id, skill_url FROM Skill WHERE esco_level IS NULL AND skill_url IS NOT NULL AND skill_url != ''")
+        cur.execute(
+            "SELECT skill_id, skill_url FROM Skill WHERE esco_level IS NULL AND skill_url IS NOT NULL AND skill_url != ''")
         missing_skills = cur.fetchall()
         cur.close()
         conn.close()
@@ -3175,20 +3266,20 @@ def _update_missing_skill_levels_task(
         def lookup_and_update(skill_row):
             skill_id = skill_row['skill_id']
             url_value = skill_row['skill_url']
-            
+
             try:
                 resp = requests.post(
-                  f"{os.environ['API_TRACKER_BASE_URL'].rstrip('/')}/skills?page=1",
-                  headers=headers,
-                  data=f"ids={requests.utils.quote(url_value)}",
-                  verify=False,
-              )
-
+                    f"{os.environ['API_TRACKER_BASE_URL'].rstrip('/')}/skills?page=1",
+                    headers=headers,
+                    data=f"ids={requests.utils.quote(url_value)}",
+                    verify=False,
+                )
 
                 if not resp.ok:
-                    logger.warning(f"[Task {task_id}] API call for URL '{url_value}' failed with status {resp.status_code}.")
+                    logger.warning(
+                        f"[Task {task_id}] API call for URL '{url_value}' failed with status {resp.status_code}.")
                     return False
-        
+
                 items = resp.json().get("items", [])
                 if not items:
                     logger.warning(f"[Task {task_id}] API call for URL '{url_value}' returned no items.")
@@ -3200,15 +3291,16 @@ def _update_missing_skill_levels_task(
                 skill_levels_list = item.get("skill_levels")
                 if isinstance(skill_levels_list, list) and skill_levels_list:
                     level_val = ",".join(map(str, sorted(skill_levels_list)))
-                
+
                 if not level_val:
                     level_val = item.get("level") or item.get("skill_level")
-                
+
                 if level_val is None:
-                    logger.warning(f"[Task {task_id}] No level information found for skill_id={skill_id} (URL: {url_value}).")
-       
+                    logger.warning(
+                        f"[Task {task_id}] No level information found for skill_id={skill_id} (URL: {url_value}).")
+
                 level_val_str = str(level_val)
-            
+
             except (requests.exceptions.RequestException, json.JSONDecodeError, IndexError) as e:
                 logger.error(f"[Task {task_id}] API/Network error for URL '{url_value}': {e}")
                 return False
@@ -3217,14 +3309,15 @@ def _update_missing_skill_levels_task(
                 db_conn = db_pool.get_connection()
                 cursor = db_conn.cursor()
 
-                logger.info(f"[Task {task_id}] ATTEMPTING DB WRITE: SET esco_level = '{level_val_str}' WHERE skill_id = {skill_id}")
+                logger.info(
+                    f"[Task {task_id}] ATTEMPTING DB WRITE: SET esco_level = '{level_val_str}' WHERE skill_id = {skill_id}")
 
                 cursor.execute(
                     "UPDATE Skill SET esco_level = %s WHERE skill_id = %s",
                     (level_val_str, skill_id),
                 )
                 db_conn.commit()
-                
+
                 row_count = cursor.rowcount
                 cursor.close()
                 db_conn.close()
@@ -3262,6 +3355,7 @@ def _update_missing_skill_levels_task(
         logger.exception(f"[Task {task_id}] A critical error terminated the task: {e}")
         set_status(status="failed", finished_at=time.time(), error=str(e))
 
+
 @app.get("/db/ping", tags=["Debug"])
 def db_ping():
     try:
@@ -3274,20 +3368,14 @@ def db_ping():
         raise HTTPException(status_code=500, detail=f"DB ping failed: {e}")
     finally:
         try:
-            cur.close(); conn.close()
+            cur.close();
+            conn.close()
         except Exception:
             pass
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
-
-
-
-
 
