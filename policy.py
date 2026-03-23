@@ -157,35 +157,39 @@ def trigger_analysis(
         "parameters": {"threshold": threshold, "sector": sector or "ALL"}
     }
 
-
 @router.get("/policy/results", summary="Get policy recommendations from DB")
 def get_results(
     db: Session = Depends(get_db),
     threshold: float = Query(None, description="Optional: Filter by threshold used in analysis", ge=0.0, le=1.0),
     sector: str = Query(None, description="Optional: Filter by sector used in analysis"),
-    country: str = Query(None, description="Optional: Filter by country name")
+    country: str = Query(None, description="Optional: Filter by country name"),
+    limit: int = Query(None, description="Optional: Max number of results to return", ge=1, le=1000)
 ):
-    """
-    Επιστρέφει τα αποτελέσματα ανάλυσης sorted by coverage_score (descending).
-    Προαιρετικά φιλτράρει με threshold, sector και/ή country.
-    """
     try:
-        query = db.query(PolicyRecommendation)
+        id_query = db.query(PolicyRecommendation.id, PolicyRecommendation.coverage_score)
 
         if threshold is not None:
-            query = query.filter(PolicyRecommendation.threshold == threshold)
-
+            id_query = id_query.filter(
+                PolicyRecommendation.threshold.between(threshold - 0.001, threshold + 0.001)
+            )
         if sector is not None:
-            query = query.filter(PolicyRecommendation.sector == sector)
-
+            id_query = id_query.filter(PolicyRecommendation.sector == sector)
         if country is not None:
-            query = query.filter(PolicyRecommendation.country.ilike(f"%{country}%"))
+            id_query = id_query.filter(PolicyRecommendation.country.ilike(f"%{country}%"))
 
-        results = query.order_by(PolicyRecommendation.coverage_score.desc()).all()
+        q = id_query.order_by(PolicyRecommendation.coverage_score.desc())
+        if limit is not None:
+            q = q.limit(limit)
+        top_ids = [row.id for row in q.all()]
 
-        if not results:
+        if not top_ids:
             return {"message": "No results found for the given filters.", "data": []}
 
+        results = db.query(PolicyRecommendation).filter(
+            PolicyRecommendation.id.in_(top_ids)
+        ).all()
+
+        results.sort(key=lambda r: r.coverage_score or 0, reverse=True)
         return results
 
     except Exception as e:

@@ -6,11 +6,11 @@ import mysql.connector
 from typing import List, Dict, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 
 try:
     from config import DB_CONFIG
 except ImportError:
-    import os
     DB_CONFIG = {
         "host": os.getenv("DB_HOST", "mysql-curriculum-skill"),
         "port": int(os.getenv("DB_PORT", 3306)),
@@ -41,7 +41,7 @@ class EducationRecommendationSystem:
         try:
             try:
                 df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
-            except:
+            except Exception:
                 df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='latin-1')
 
             df.columns = df.columns.str.strip().str.replace('"', '')
@@ -62,7 +62,7 @@ class EducationRecommendationSystem:
         try:
             try:
                 df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
-            except:
+            except Exception:
                 df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='latin-1')
 
             df.columns = df.columns.str.strip().str.replace('"', '')
@@ -74,7 +74,8 @@ class EducationRecommendationSystem:
             occupations = set()
 
             def clean_text(text):
-                if not isinstance(text, str): return ""
+                if not isinstance(text, str):
+                    return ""
                 return text.replace("β€™", "'").replace("â€™", "'").strip().strip('"').strip("'")
 
             if 'Label4' in df.columns:
@@ -166,13 +167,9 @@ class EducationRecommendationSystem:
             cursor.execute(query)
             rows = cursor.fetchall()
 
-            from collections import defaultdict
             grouped = defaultdict(list)
-
             for r in rows:
-                country = r["country"]
-                skill = r["skill_name"]
-                grouped[country].append(skill)
+                grouped[r["country"]].append(r["skill_name"])
 
             results = dict(grouped)
 
@@ -185,29 +182,45 @@ class EducationRecommendationSystem:
         return results
 
     def get_courses_from_other_countries(self, skills: List[str], current_country: str) -> Dict[str, List[str]]:
-        skill_courses = {}
+        """
+        Βελτιωμένη έκδοση: χρησιμοποιεί batch IN query αντί για loop ανά skill.
+        Πολύ πιο γρήγορο (1 query αντί για N queries).
+        """
+        if not skills:
+            return {}
+
+        skill_courses = defaultdict(list)
         conn = None
+
+        # Batch ανά 50 skills για να μην γεμίζει το IN clause
+        BATCH_SIZE = 50
+
         try:
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor(dictionary=True)
 
-            for skill in skills:
-                query = """
-                    SELECT c.lesson_name, u.university_name, u.country
+            logger.info(f"  Fetching courses for {len(skills)} missing skills in '{current_country}' (batch size={BATCH_SIZE})...")
+
+            for i in range(0, len(skills), BATCH_SIZE):
+                batch = skills[i:i + BATCH_SIZE]
+                placeholders = ', '.join(['%s'] * len(batch))
+
+                query = f"""
+                    SELECT s.skill_name, c.lesson_name, u.university_name, u.country
                     FROM Skill s
                     JOIN CourseSkill cs ON s.skill_id = cs.skill_id
                     JOIN Course c ON cs.course_id = c.course_id
                     JOIN University u ON c.university_id = u.university_id
-                    WHERE s.skill_name LIKE %s 
-                    AND u.country <> %s 
+                    WHERE s.skill_name IN ({placeholders})
+                    AND u.country <> %s
                     AND u.country <> 'Unknown'
-                    LIMIT 10
+                    LIMIT 500
                 """
-                cursor.execute(query, (f"%{skill}%", current_country))
+                cursor.execute(query, [*batch, current_country])
                 rows = cursor.fetchall()
 
-                courses = []
                 for r in rows:
+                    skill_name = r["skill_name"]
                     c_name = r["lesson_name"]
                     u_name = r["university_name"]
                     u_country = r["country"]
@@ -215,18 +228,20 @@ class EducationRecommendationSystem:
                     if current_country.lower() in u_name.lower():
                         continue
 
-                    courses.append(f"{c_name} ({u_name}) - [{u_country}]")
+                    entry = f"{c_name} ({u_name}) - [{u_country}]"
+                    skill_courses[skill_name].append(entry)
 
-                if courses:
-                    skill_courses[skill] = list(set(courses))
+            # Deduplicate
+            result = {skill: list(set(courses)) for skill, courses in skill_courses.items()}
 
         except Exception as e:
             logger.error(f"DB Error in get_courses_from_other_countries: {e}")
+            result = {}
         finally:
             if conn and conn.is_connected():
                 conn.close()
 
-        return skill_courses
+        return result
 
     def run_analysis(self, skill_threshold: float = 0.7, sector: str = None) -> Dict[str, Any]:
         occupations = self.load_occupation_titles_from_csv(sector_filter=sector)
@@ -240,36 +255,39 @@ class EducationRecommendationSystem:
         logger.info("Loading university skills from DB...")
         country_data = self.get_all_countries_skills()
 
+        total_countries = len(country_data)
+        logger.info(f"Starting analysis for {total_countries} countries...")
+
+        # Υπολόγισε το all_req_set μία φορά (όχι μέσα στο loop)
+        all_req_list = []
+        for s_list in req_skills.values():
+            all_req_list.extend(s_list)
+        all_req_set = set(all_req_list)
+
+        logger.info(f"Total unique required skills across all occupations: {len(all_req_set)}")
+
         final_results = {}
 
-        for country, c_skills in country_data.items():
-            logger.info(f"Analyzing country: {country}")
+        for idx, (country, c_skills) in enumerate(country_data.items(), start=1):
+            logger.info(f"[{idx}/{total_countries}] Analyzing country: {country}")
 
-            all_req_list = []
-            for s_list in req_skills.values():
-                all_req_list.extend(s_list)
-
-            all_req_set = set(all_req_list)
             c_skills_set = set(c_skills)
 
-            # --- ΥΠΟΛΟΓΙΣΜΟΣ COVERAGE SCORE ---
+            # Coverage Score
             present_skills = all_req_set.intersection(c_skills_set)
             total_needed = len(all_req_set)
-
-            if total_needed > 0:
-                coverage_score = round((len(present_skills) / total_needed) * 100, 2)
-            else:
-                coverage_score = 0.0
-            # ----------------------------------
+            coverage_score = round((len(present_skills) / total_needed) * 100, 2) if total_needed > 0 else 0.0
 
             missing = all_req_set - c_skills_set
 
+            # Missing departments ανά occupation
             missing_depts = {}
             for occ, skills in req_skills.items():
                 inter = set(skills).intersection(missing)
                 if inter:
                     missing_depts[occ] = list(inter)
 
+            # Missing courses (batch query)
             missing_courses = {}
             if missing:
                 missing_courses = self.get_courses_from_other_countries(list(missing), country)
@@ -280,4 +298,7 @@ class EducationRecommendationSystem:
                 "missing_courses": missing_courses
             }
 
+            logger.info(f"  ✅ {country}: coverage={coverage_score}%, missing_skills={len(missing)}, missing_courses_found={len(missing_courses)}")
+
+        logger.info(f"🎉 Analysis complete for all {total_countries} countries.")
         return final_results
