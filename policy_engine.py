@@ -5,13 +5,13 @@ import logging
 import mysql.connector
 from typing import List, Dict, Any
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from config import DB_CONFIG
 except ImportError:
     import os
     DB_CONFIG = {
-        #"host": os.getenv("DB_HOST", "db"),
         "host": os.getenv("DB_HOST", "mysql-curriculum-skill"),
         "port": int(os.getenv("DB_PORT", 3306)),
         "user": os.getenv("DB_USER", "root"),
@@ -92,31 +92,60 @@ class EducationRecommendationSystem:
             logger.error(f"Error reading CSV: {e}")
             return []
 
-    def get_required_skills(self, occupation_titles: List[str], min_val: float = 0.7) -> Dict[str, List[str]]:
-        occupation_skills = {}
-        # Slice για ταχύτητα
-        for occupation in occupation_titles[:30]:
-            try:
-                payload = {"occupation_name": occupation}
-                resp = requests.post(f"{self.service2_url}/required_skills_service", json=payload, timeout=10)
+    def _fetch_skills_for_occupation(self, occupation: str, min_val: float) -> tuple:
+        """
+        Κάνει το HTTP request για ένα occupation και επιστρέφει (occupation, skills).
+        Χρησιμοποιείται από το ThreadPoolExecutor.
+        """
+        try:
+            payload = {"occupation_name": occupation}
+            resp = requests.post(
+                f"{self.service2_url}/required_skills_service",
+                json=payload,
+                timeout=10
+            )
 
-                if resp.status_code == 200 and resp.text:
-                    data = resp.json()
-                    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
-                        if "cannot open" in data[0].lower() or "error" in data[0].lower():
-                            occupation_skills[occupation] = []
-                            continue
-                    filtered = []
-                    if isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict) and item.get('Value', 0) >= min_val:
-                                filtered.append(item.get('Skill'))
-                    if filtered:
-                        occupation_skills[occupation] = filtered
-                else:
-                    occupation_skills[occupation] = []
-            except Exception:
-                occupation_skills[occupation] = []
+            if resp.status_code == 200 and resp.text:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
+                    if "cannot open" in data[0].lower() or "error" in data[0].lower():
+                        return occupation, []
+                filtered = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get('Value', 0) >= min_val:
+                            filtered.append(item.get('Skill'))
+                return occupation, filtered
+            else:
+                return occupation, []
+        except Exception as e:
+            logger.warning(f"Failed to fetch skills for '{occupation}': {e}")
+            return occupation, []
+
+    def get_required_skills(self, occupation_titles: List[str], min_val: float = 0.7) -> Dict[str, List[str]]:
+        """
+        Παράλληλα HTTP requests για όλα τα occupations με ThreadPoolExecutor (max_workers=10).
+        """
+        occupation_skills = {}
+        total = len(occupation_titles)
+        logger.info(f"Fetching required skills for {total} occupations in parallel (max_workers=10)...")
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(self._fetch_skills_for_occupation, occ, min_val): occ
+                for occ in occupation_titles
+            }
+
+            completed = 0
+            for future in as_completed(futures):
+                occupation, skills = future.result()
+                if skills:
+                    occupation_skills[occupation] = skills
+                completed += 1
+                if completed % 50 == 0:
+                    logger.info(f"  Progress: {completed}/{total} occupations processed...")
+
+        logger.info(f"✅ Skills fetched for {len(occupation_skills)}/{total} occupations with results.")
         return occupation_skills
 
     def get_all_countries_skills(self) -> Dict[str, List[str]]:
@@ -162,7 +191,7 @@ class EducationRecommendationSystem:
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor(dictionary=True)
 
-            for skill in skills[:20]:
+            for skill in skills:
                 query = """
                     SELECT c.lesson_name, u.university_name, u.country
                     FROM Skill s
@@ -205,7 +234,7 @@ class EducationRecommendationSystem:
         if not occupations:
             return {"error": f"No occupations found for sector '{sector}'" if sector else "No occupations found"}
 
-        logger.info(f"Loading required skills (threshold={skill_threshold})...")
+        logger.info(f"Loading required skills (threshold={skill_threshold}) for {len(occupations)} occupations...")
         req_skills = self.get_required_skills(occupations, skill_threshold)
 
         logger.info("Loading university skills from DB...")

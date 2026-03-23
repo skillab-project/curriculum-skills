@@ -34,7 +34,6 @@ SERVICE2_URL = os.getenv(
     "https://portal.skillab-project.eu/required-skills"
 )
 
-# ΝΕΟ PATH: Βρίσκει τον φάκελο data στο root directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "data", "New_occupation_table.csv")
 
@@ -53,12 +52,12 @@ class PolicyRecommendation(BasePolicy):
     __tablename__ = "policy_recommendations"
     id = Column(Integer, primary_key=True, index=True)
     country = Column(String(100), nullable=False, index=True)
-
-    # ΣΤΗΛΗ ΓΙΑ ΤΟ COVERAGE (π.χ. 45.2%)
     coverage_score = Column(Float, nullable=True)
-
     missing_departments = Column(JSON, nullable=True)
     missing_courses = Column(JSON, nullable=True)
+    # Αποθηκεύουμε και τις παραμέτρους της ανάλυσης για φιλτράρισμα αργότερα
+    threshold = Column(Float, nullable=True)
+    sector = Column(String(255), nullable=True)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
 
@@ -78,9 +77,13 @@ def run_policy_analysis_logic(db: Session, threshold: float, sector: str = None)
     try:
         count = 0
         for country, data in results.items():
-            existing = db.query(PolicyRecommendation).filter_by(country=country).first()
+            # Ψάχνουμε existing record με ίδιο country + threshold + sector
+            existing = db.query(PolicyRecommendation).filter_by(
+                country=country,
+                threshold=threshold,
+                sector=sector
+            ).first()
 
-            # Παίρνουμε το σκορ από τα αποτελέσματα
             cov_score = data.get("coverage_score", 0.0)
 
             if existing:
@@ -92,7 +95,9 @@ def run_policy_analysis_logic(db: Session, threshold: float, sector: str = None)
                     country=country,
                     coverage_score=cov_score,
                     missing_departments=data["missing_departments"],
-                    missing_courses=data["missing_courses"]
+                    missing_courses=data["missing_courses"],
+                    threshold=threshold,
+                    sector=sector
                 )
                 db.add(new_rec)
             count += 1
@@ -116,14 +121,24 @@ def background_task_wrapper(threshold: float, sector: str = None):
 # ENDPOINTS
 # ==========================================
 
-@router.get("/policy/sectors", summary="View available education sectors (US 37.1)")
-def get_sectors():
+@router.get("/policy/sectors", summary="View available education sectors")
+def get_sectors(
+    starts_with: str = Query(None, description="Optional: Filter sectors that start with these characters")
+):
+    """
+    Επιστρέφει όλα τα διαθέσιμα sectors.
+    Αν δοθεί η παράμετρος starts_with, επιστρέφει μόνο τα sectors που αρχίζουν με τα συγκεκριμένα γράμματα.
+    """
     system = EducationRecommendationSystem(SERVICE2_URL, "unused", CSV_PATH)
     sectors = system.get_available_sectors()
-    return {"sectors": sectors}
+
+    if starts_with:
+        sectors = [s for s in sectors if s.lower().startswith(starts_with.lower())]
+
+    return {"sectors": sectors, "count": len(sectors)}
 
 
-@router.post("/policy/analyze", summary="Trigger multi-country policy analysis (Background) (US 37.2)")
+@router.post("/policy/analyze", summary="Trigger multi-country policy analysis (Background)")
 def trigger_analysis(
         background_tasks: BackgroundTasks,
         threshold: float = Query(0.7, description="Minimum skill value threshold", ge=0.0, le=1.0),
@@ -143,17 +158,35 @@ def trigger_analysis(
     }
 
 
-@router.get("/policy/results", summary="Get all policy recommendations from DB")
-def get_all_results(db: Session = Depends(get_db)):
+@router.get("/policy/results", summary="Get policy recommendations from DB")
+def get_results(
+    db: Session = Depends(get_db),
+    threshold: float = Query(None, description="Optional: Filter by threshold used in analysis", ge=0.0, le=1.0),
+    sector: str = Query(None, description="Optional: Filter by sector used in analysis"),
+    country: str = Query(None, description="Optional: Filter by country name")
+):
+    """
+    Επιστρέφει τα αποτελέσματα ανάλυσης sorted by coverage_score (descending).
+    Προαιρετικά φιλτράρει με threshold, sector και/ή country.
+    """
     try:
-        return db.query(PolicyRecommendation).all()
+        query = db.query(PolicyRecommendation)
+
+        if threshold is not None:
+            query = query.filter(PolicyRecommendation.threshold == threshold)
+
+        if sector is not None:
+            query = query.filter(PolicyRecommendation.sector == sector)
+
+        if country is not None:
+            query = query.filter(PolicyRecommendation.country.ilike(f"%{country}%"))
+
+        results = query.order_by(PolicyRecommendation.coverage_score.desc()).all()
+
+        if not results:
+            return {"message": "No results found for the given filters.", "data": []}
+
+        return results
+
     except Exception as e:
         return {"message": "No results yet or table missing.", "error": str(e)}
-
-
-@router.get("/policy/results/{country}", summary="Get policy recommendations for specific country")
-def get_country_result(country: str, db: Session = Depends(get_db)):
-    res = db.query(PolicyRecommendation).filter(PolicyRecommendation.country.ilike(country)).first()
-    if not res:
-        raise HTTPException(status_code=404, detail=f"No recommendations found for country: {country}")
-    return res
