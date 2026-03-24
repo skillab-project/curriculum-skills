@@ -62,6 +62,16 @@ pipeline {
             }
         }
 
+        // ******************
+        // *** UNIT TESTS ***
+        // ******************
+        stage("Run Unit Tests") {
+            steps {
+                echo "***** Run Unit Tests in Docker *****"
+                sh "docker compose run --rm curriculum-skills python -m pytest tests/unit/"
+            }
+        }
+
         // ****************************
         // *** Push Images In Harbor ***
         // ****************************
