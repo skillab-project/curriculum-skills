@@ -68,7 +68,7 @@ pipeline {
         stage("Run Unit Tests") {
             steps {
                 echo "***** Run Unit Tests in Docker *****"
-                sh "docker compose run --rm curriculum-skills python -m pytest tests/unit/"
+                sh "docker compose run --rm curriculum-skills python -m pytest tests/"
             }
         }
 
