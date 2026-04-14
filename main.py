@@ -94,6 +94,10 @@ from recommendation_system.backend.routers.filters import router as filters_rout
 from recommendation_system.backend.routers.recommendations import router as recommendations_router
 from policy import router as policy_router
 
+from skill_gap.router import router as skill_gap_router
+from skill_gap.longterm_pipeline import curriculum_router as sg_curriculum_router
+from skill_gap.longterm_pipeline import full_pipeline_router as sg_pipeline_router
+
 logger = logging.getLogger("db_saver")
 
 logging.basicConfig(
@@ -106,7 +110,11 @@ globals()["TASKS"] = TASKS
 
 load_dotenv()
 
-CURRICU_CLIENT = Client("marfoli/CurricuNLP")
+try:
+    CURRICU_CLIENT = Client("marfoli/CurricuNLP")
+except Exception as e:
+    logging.warning(f"CurricuNLP client init failed (HF space may be down): {e}")
+    CURRICU_CLIENT = None
 
 CURRICUNLP_BASES = [
     "https://marfoli-curriculnlp.hf.space",
@@ -240,6 +248,9 @@ app.include_router(
     tags=["Education Policy"]
 )
 
+app.include_router(skill_gap_router, prefix="/skill-gap")
+app.include_router(sg_curriculum_router, prefix="/skill-gap")
+app.include_router(sg_pipeline_router, prefix="/skill-gap")
 
 class DebugPDFRequest(BaseModel):
     pdf_name: str

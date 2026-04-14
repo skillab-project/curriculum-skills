@@ -36,6 +36,7 @@ services:
     volumes:
       - curriculum-curriculum:/app/curriculum
       - curriculum-crawler_json:/app/crawler_json
+      - skill-gap-longterm:/app/longterm_storage
     env_file:
       - .env
     environment:
@@ -46,6 +47,9 @@ services:
       - DB_USER=root
       - DB_PASSWORD=root
       - DB_NAME=skillcrawl
+      - LONGTERM_STORAGE_DIR=/app/longterm_storage
+      - TRENDS_API_BASE_URL=https://portal.skillab-project.eu/future-technology-trends-identifier
+      - REQUIRED_SKILLS_SERVICE_URL=https://portal.skillab-project.eu/required-skills
     command: >
       uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
@@ -65,5 +69,8 @@ volumes:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
   curriculum-crawler_json:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+  skill-gap-longterm:
     labels:
       io.portainer.accesscontrol.teams: skillab-all

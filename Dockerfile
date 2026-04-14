@@ -25,3 +25,5 @@ RUN mkdir -p /docker-entrypoint-initdb.d \
 
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+RUN mkdir -p /app/longterm_storage
