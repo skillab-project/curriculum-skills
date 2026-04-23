@@ -100,7 +100,9 @@ pipeline {
         // ********************************
         stage("Push_Image_Docker_Hub"){
             when {
-                environment name: "GIT_BRANCH", value: "origin/main"
+                expression {
+                    env.BRANCH_NAME == 'main' || env.GIT_BRANCH in ['origin/main', 'main', 'refs/heads/main']
+                }
             }
             steps {
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_HUB_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
