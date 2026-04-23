@@ -99,12 +99,8 @@ pipeline {
         // *** Push Images In Docker Hub ***
         // ********************************
         stage("Push_Image_Docker_Hub"){
-            when {
-                expression {
-                    env.BRANCH_NAME == 'main' || env.GIT_BRANCH in ['origin/main', 'main', 'refs/heads/main']
-                }
-            }
             steps {
+                echo "Branch context: BRANCH_NAME='${env.BRANCH_NAME}', GIT_BRANCH='${env.GIT_BRANCH}'"
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_HUB_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Push Docker Image to Docker Hub *****"
                     sh 'docker login ${DOCKER_HUB_REG} -u ${USERNAME} -p ${PASSWORD}'
