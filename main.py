@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, AnyUrl
 from typing import List, Dict, Optional, Literal, Set, Any
@@ -3366,6 +3366,283 @@ def _update_missing_skill_levels_task(
         logger.exception(f"[Task {task_id}] A critical error terminated the task: {e}")
         set_status(status="failed", finished_at=time.time(), error=str(e))
 
+
+UPLOAD_PDF_DIR = os.environ.get("UPLOAD_PDF_DIR", "./uploaded_pdfs")
+
+
+def _safe_filename(filename: str) -> str:
+    filename = os.path.basename(filename or "uploaded.pdf")
+    filename = re.sub(r"[^a-zA-Z0-9_.-]+", "_", filename)
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    return filename
+
+
+def _labels_to_structured_courses(
+        labels: List[Dict[str, Any]],
+        university_name: str,
+        source_file: Optional[str] = None,
+        website: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Converts merged CurricuNLP labels into structured course objects.
+    Segments by lesson_name and attaches following labels to that lesson.
+    """
+
+    courses = []
+    current = None
+
+    for item in labels or []:
+        label = (
+            item.get("class_or_confidence")
+            or item.get("label")
+            or item.get("entity_group")
+            or ""
+        ).strip()
+
+        token = (
+            item.get("token")
+            or item.get("word")
+            or item.get("text")
+            or ""
+        ).strip()
+
+        confidence = item.get("confidence")
+
+        if not label or not token:
+            continue
+
+        if label == "lesson_name":
+            if current and current.get("lesson_name"):
+                courses.append(current)
+
+            current = {
+                "lesson_name": token,
+                "website": website,
+                "source_file": source_file,
+                "university_name": university_name,
+                "labels": [],
+                "extras": {},
+            }
+
+        if current is None:
+            current = {
+                "lesson_name": None,
+                "website": website,
+                "source_file": source_file,
+                "university_name": university_name,
+                "labels": [],
+                "extras": {},
+            }
+
+        current["labels"].append({
+            "class_or_confidence": label,
+            "token": token,
+            "confidence": confidence
+        })
+
+        if label == "lesson_name":
+            current["lesson_name"] = token
+        elif label in {
+            "description",
+            "objectives",
+            "learning_outcomes",
+            "course_content",
+            "assessment",
+            "exam",
+            "prerequisites",
+            "general_competences",
+            "educational_material",
+            "ects",
+            "semester",
+            "hours",
+            "professor",
+            "language",
+            "mand_opt",
+            "year",
+            "department",
+            "msc_bsc",
+            "degree_title",
+            "attendence_type",
+            "attendance_type",
+            "fee",
+            "website"
+        }:
+            existing = current.get(label)
+
+            if existing is None:
+                current[label] = token
+            elif isinstance(existing, list):
+                if token not in existing:
+                    existing.append(token)
+            else:
+                if token != existing:
+                    current[label] = [existing, token]
+        else:
+            existing = current["extras"].get(label)
+            if existing is None:
+                current["extras"][label] = token
+            elif isinstance(existing, list):
+                if token not in existing:
+                    existing.append(token)
+            else:
+                if token != existing:
+                    current["extras"][label] = [existing, token]
+
+    if current and (current.get("lesson_name") or current.get("labels")):
+        courses.append(current)
+
+    prepared = _prepare_and_merge_courses(
+        courses,
+        university_name,
+        file_hint=source_file,
+        fuzzy_threshold=88
+    )
+
+    return prepared
+    
+@app.post(
+    "/pdf/upload_and_process",
+    tags=["PDF", "CurricuNLP"],
+    summary="Upload a PDF, run CurricuNLP, segment it into structured courses"
+)
+async def upload_pdf_and_process(
+        file: UploadFile = File(...),
+        university_name: Optional[str] = Form(None),
+        country: Optional[str] = Form(None),
+        website: Optional[str] = Form(None),
+        save_to_db: bool = Form(False),
+        translate: bool = Form(False),
+        chunk_size: int = Form(2000),
+        overlap: int = Form(250),
+        max_chars: int = Form(80000),
+        background_tasks: BackgroundTasks = None
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    os.makedirs(UPLOAD_PDF_DIR, exist_ok=True)
+
+    safe_name = f"{uuid4()}_{_safe_filename(file.filename)}"
+    pdf_path = os.path.join(UPLOAD_PDF_DIR, safe_name)
+
+    try:
+        with open(pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded PDF: {e}")
+
+    try:
+        full_text = extract_text_from_pdf_best(pdf_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {e}")
+
+    cleaned_text = _clean_pdf_text(full_text or "")
+
+    if not cleaned_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="No usable text could be extracted from the PDF."
+        )
+
+    detected_lang = _detect_lang(cleaned_text)
+
+    if translate and detected_lang != "en":
+        try:
+            cleaned_text = _translate_hf(cleaned_text)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Translation failed: {e}")
+
+    if university_name and university_name.strip():
+        uni_guess = university_name.strip()
+    else:
+        uni_guess = re.sub(
+            r"[_\W]+",
+            " ",
+            os.path.splitext(file.filename)[0]
+        ).strip()
+
+    meta = _find_uni_by_name(uni_guess)
+
+    final_university_name = (
+            university_name
+            or meta.get("name")
+            or uni_guess
+            or "Unknown University"
+    )
+
+    final_country = (
+            country
+            or meta.get("country")
+            or "Unknown"
+    )
+
+    domain = meta.get("domain")
+
+    try:
+        labels = call_curriculnlp_on_text(
+            cleaned_text,
+            max_chars=max_chars,
+            chunk_size=chunk_size,
+            overlap=overlap
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"CurricuNLP pipeline failed: {e}")
+
+    structured_courses = _labels_to_structured_courses(
+        labels=labels,
+        university_name=final_university_name,
+        source_file=os.path.basename(pdf_path),
+        website=website
+    )
+
+    payload = {
+        "university_name": final_university_name,
+        "country": final_country,
+        "university_meta": {
+            "name": final_university_name,
+            "country": final_country,
+            "domain": domain
+        },
+        "source_file": os.path.basename(pdf_path),
+        "original_filename": file.filename,
+        "language": {
+            "detected": detected_lang,
+            "translated": bool(translate and detected_lang != "en")
+        },
+        "text_stats": {
+            "characters": len(cleaned_text),
+            "max_chars_used": max_chars,
+            "chunk_size": chunk_size,
+            "overlap": overlap
+        },
+        "labels_count": len(labels or []),
+        "lesson_count": len(structured_courses),
+        "courses": structured_courses
+    }
+
+    if save_to_db:
+        if not is_database_connected(DB_CONFIG):
+            raise HTTPException(status_code=500, detail="Database connection failed.")
+
+        task_id = str(uuid4())
+        TASKS[task_id] = {
+            "status": "queued",
+            "queued_at": time.time(),
+            "type": "upload_pdf_and_process_save",
+            "source_file": os.path.basename(pdf_path),
+            "university_name": final_university_name
+        }
+
+        background_tasks.add_task(_save_payload_task, task_id, payload)
+
+        payload["db_save"] = {
+            "status": "queued",
+            "task_id": task_id,
+            "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress."
+        }
+
+    return payload
 
 @app.get("/db/ping", tags=["Debug"])
 def db_ping():
