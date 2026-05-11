@@ -3378,19 +3378,57 @@ def _safe_filename(filename: str) -> str:
     return filename
 
 
+def _flatten_values(value):
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_flatten_values(item))
+        return out
+
+    if isinstance(value, tuple):
+        out = []
+        for item in value:
+            out.extend(_flatten_values(item))
+        return out
+
+    return [value]
+
+
 def _labels_to_structured_courses(
         labels: List[Dict[str, Any]],
         university_name: str,
         source_file: Optional[str] = None,
         website: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """
-    Converts merged CurricuNLP labels into structured course objects.
-    Segments by lesson_name and attaches following labels to that lesson.
-    """
 
     courses = []
     current = None
+
+    multi_value_fields = {
+        "professor",
+        "degree_title",
+        "msc_bsc",
+        "language",
+        "semester",
+        "hours",
+        "ects",
+        "website",
+    }
+
+    text_fields = {
+        "description",
+        "objectives",
+        "learning_outcomes",
+        "course_content",
+        "assessment",
+        "exam",
+        "prerequisites",
+        "general_competences",
+        "educational_material",
+    }
 
     for item in labels or []:
         label = (
@@ -3419,6 +3457,7 @@ def _labels_to_structured_courses(
             current = {
                 "lesson_name": token,
                 "website": website,
+                "websites": [website] if website else [],
                 "source_file": source_file,
                 "university_name": university_name,
                 "labels": [],
@@ -3429,6 +3468,7 @@ def _labels_to_structured_courses(
             current = {
                 "lesson_name": None,
                 "website": website,
+                "websites": [website] if website else [],
                 "source_file": source_file,
                 "university_name": university_name,
                 "labels": [],
@@ -3443,63 +3483,49 @@ def _labels_to_structured_courses(
 
         if label == "lesson_name":
             current["lesson_name"] = token
-        elif label in {
-            "description",
-            "objectives",
-            "learning_outcomes",
-            "course_content",
-            "assessment",
-            "exam",
-            "prerequisites",
-            "general_competences",
-            "educational_material",
-            "ects",
-            "semester",
-            "hours",
-            "professor",
-            "language",
-            "mand_opt",
-            "year",
-            "department",
-            "msc_bsc",
-            "degree_title",
-            "attendence_type",
-            "attendance_type",
-            "fee",
-            "website"
-        }:
-            existing = current.get(label)
 
-            if existing is None:
+        elif label in text_fields:
+            if current.get(label):
+                current[label] = f"{current[label]}\n{token}"
+            else:
                 current[label] = token
-            elif isinstance(existing, list):
-                if token not in existing:
-                    existing.append(token)
-            else:
-                if token != existing:
-                    current[label] = [existing, token]
+
+        elif label in multi_value_fields:
+            values = _flatten_values(current.get(label))
+            if token not in values:
+                values.append(token)
+            current[label] = values
+
+            if label == "website":
+                urls = _flatten_values(current.get("websites"))
+                if token not in urls:
+                    urls.append(token)
+                current["websites"] = urls
+
         else:
-            existing = current["extras"].get(label)
-            if existing is None:
-                current["extras"][label] = token
-            elif isinstance(existing, list):
-                if token not in existing:
-                    existing.append(token)
-            else:
-                if token != existing:
-                    current["extras"][label] = [existing, token]
+            existing = _flatten_values(current["extras"].get(label))
+            if token not in existing:
+                existing.append(token)
+            current["extras"][label] = existing if len(existing) > 1 else existing[0]
 
     if current and (current.get("lesson_name") or current.get("labels")):
         courses.append(current)
 
-    prepared = _prepare_and_merge_courses(
+    for course in courses:
+        course["websites"] = [
+            str(w) for w in _flatten_values(course.get("websites"))
+            if w and not isinstance(w, (dict, list, tuple))
+        ]
+
+        if course.get("website") and isinstance(course["website"], list):
+            course["website"] = course["website"][0] if course["website"] else None
+
+    return _prepare_and_merge_courses(
         courses,
         university_name,
         file_hint=source_file,
         fuzzy_threshold=88
     )
-
-    return prepared
     
 @app.post(
     "/pdf/upload_and_process",
