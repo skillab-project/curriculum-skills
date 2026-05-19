@@ -141,6 +141,23 @@ def _bounded_workers(requested: Optional[int], default: int, cap: int = 64) -> i
         value = default
     return max(1, min(value, cap))
 
+
+def _ensure_text(value: Any) -> str:
+    """Normalize PDF/extractor outputs to a plain string.
+
+    Some PDF helpers return a list of page strings, while regex-based cleaners
+    like _clean_pdf_text expect a string/bytes-like object.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(_ensure_text(v) for v in value if v is not None)
+    return str(value)
+
 def _find_pdf_path(pdf_name: str, curriculum_folder: str = "curriculum") -> str:
     if os.path.isabs(pdf_name) and os.path.exists(pdf_name):
         return pdf_name
@@ -154,7 +171,7 @@ def _find_pdf_path(pdf_name: str, curriculum_folder: str = "curriculum") -> str:
     return os.path.join(curriculum_folder, matches[0])
 
 def _ollama_generate(prompt: str, model: Optional[str] = None, temperature: float = 0.0) -> str:
-    base = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    base = (os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
     payload = {
         "model": model or OLLAMA_MODEL,
         "prompt": prompt,
@@ -166,7 +183,7 @@ def _ollama_generate(prompt: str, model: Optional[str] = None, temperature: floa
     return (r.json() or {}).get("response", "")
 
 def _ollama_tags() -> Dict[str, Any]:
-    base = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    base = (os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
     r = _http_session.get(f"{base}/api/tags", timeout=10)
     r.raise_for_status()
     return r.json()
@@ -250,6 +267,7 @@ def call_curriculnlp_on_text(
         retries=2,
         workers: Optional[int] = None,
 ):
+    full_text = _ensure_text(full_text)
     cleaned = _clean_pdf_text(full_text)
     chunks = _chunk_text(
         cleaned,
@@ -1010,7 +1028,7 @@ def list_pdfs():
 @app.post("/process_pdf", tags=["PDF"])
 def process_pdf(request: PDFProcessingRequest):
     pdf_path = _find_pdf_path(request.pdf_name)
-    full_text = extract_text_from_pdf_best(pdf_path)
+    full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
 
     university_name_guess = re.sub(r"[_\W]+", " ", os.path.basename(pdf_path).replace(".pdf", "")).strip()
     meta = _find_uni_by_name(university_name_guess)
@@ -3882,18 +3900,17 @@ async def upload_pdf_and_process(
     safe_name = f"{uuid4()}_{_safe_filename(file.filename)}"
     pdf_path = os.path.join(UPLOAD_PDF_DIR, safe_name)
 
-    try:
-        with open(pdf_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save uploaded PDF: {e}")
+    with open(pdf_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
     try:
-        full_text = extract_text_from_pdf_best(pdf_path)
+        full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {e}")
 
-    cleaned_text = _clean_pdf_text(full_text or "")
+    cleaned_text = _clean_pdf_text(full_text)
+
+
 
     if not cleaned_text.strip():
         raise HTTPException(
