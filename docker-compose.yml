@@ -50,6 +50,9 @@ services:
       - LONGTERM_STORAGE_DIR=/app/longterm_storage
       - TRENDS_API_BASE_URL=https://portal.skillab-project.eu/future-technology-trends-identifier
       - REQUIRED_SKILLS_SERVICE_URL=https://portal.skillab-project.eu/required-skills
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=gemma3:4b
+      - OLLAMA_HOST=http://host.docker.internal:11434
     command: >
       uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
@@ -60,6 +63,9 @@ services:
       retries: 5
     labels:
       io.portainer.accesscontrol.teams: skillab-all
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      
 
 volumes:
   curriculum-skills_mysql:

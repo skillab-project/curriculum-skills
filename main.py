@@ -11,7 +11,7 @@ from gradio_client import Client
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from functools import partial
-from threading import Lock
+from threading import Lock, Semaphore
 from cleaner import clean_file, iter_json_files
 
 try:
@@ -33,6 +33,7 @@ import os
 import json
 import re
 import requests
+from requests.adapters import HTTPAdapter
 import mysql.connector
 import shutil
 import time
@@ -110,6 +111,66 @@ globals()["TASKS"] = TASKS
 
 load_dotenv()
 
+# -----------------------------------------------------------------------------
+# NVIDIA / Ollama / throughput configuration
+# -----------------------------------------------------------------------------
+# For best results, set these in your shell/systemd service before starting
+# Ollama/FastAPI. Ollama reads GPU settings when its server starts.
+os.environ.setdefault("OLLAMA_HOST", "http://127.0.0.1:11434")
+os.environ.setdefault("OLLAMA_NUM_GPU", "999")
+os.environ.setdefault("OLLAMA_NUM_PARALLEL", "4")
+os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
+os.environ.setdefault("OLLAMA_FLASH_ATTN", "1")
+
+PDF_CPU_WORKERS = int(os.getenv("PDF_CPU_WORKERS", str(max(2, min(8, os.cpu_count() or 4)))))
+CURRICUNLP_WORKERS = int(os.getenv("CURRICUNLP_WORKERS", "2"))
+CURRICUNLP_MAX_CHUNKS = int(os.getenv("CURRICUNLP_MAX_CHUNKS", "128"))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "180"))
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+
+_http_session = requests.Session()
+_http_adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=2)
+_http_session.mount("http://", _http_adapter)
+_http_session.mount("https://", _http_adapter)
+_curricu_semaphore = Semaphore(max(1, CURRICUNLP_WORKERS))
+
+def _bounded_workers(requested: Optional[int], default: int, cap: int = 64) -> int:
+    try:
+        value = int(requested or default)
+    except Exception:
+        value = default
+    return max(1, min(value, cap))
+
+def _find_pdf_path(pdf_name: str, curriculum_folder: str = "curriculum") -> str:
+    if os.path.isabs(pdf_name) and os.path.exists(pdf_name):
+        return pdf_name
+    os.makedirs(curriculum_folder, exist_ok=True)
+    matches = [
+        f for f in os.listdir(curriculum_folder)
+        if f.lower().endswith(".pdf") and pdf_name.lower() in f.lower()
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return os.path.join(curriculum_folder, matches[0])
+
+def _ollama_generate(prompt: str, model: Optional[str] = None, temperature: float = 0.0) -> str:
+    base = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    payload = {
+        "model": model or OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    r = _http_session.post(f"{base}/api/generate", json=payload, timeout=OLLAMA_TIMEOUT)
+    r.raise_for_status()
+    return (r.json() or {}).get("response", "")
+
+def _ollama_tags() -> Dict[str, Any]:
+    base = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    r = _http_session.get(f"{base}/api/tags", timeout=10)
+    r.raise_for_status()
+    return r.json()
+
 try:
     CURRICU_CLIENT = Client("marfoli/CurricuNLP")
 except Exception as e:
@@ -151,24 +212,72 @@ def _parse_gradio_response(out) -> List[Dict]:
     return []
 
 
-def call_curriculnlp_on_text(full_text: str, max_chars=40000, chunk_size=2000, overlap=250, pause=0.2, retries=2):
-    client = Client("marfoli/CurricuNLP")
-    chunks = _chunk_text(_clean_pdf_text(full_text), chunk_size=chunk_size, overlap=overlap, limit=max_chars)
-    out = []
-    for ch in chunks:
-        attempt = 0
-        while True:
-            try:
+def _predict_curriculnlp_chunk(ch: str, retries: int = 2, pause: float = 0.05) -> List[Dict]:
+    """Run one CurricuNLP chunk with bounded concurrency and retries."""
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            with _curricu_semaphore:
+                client = CURRICU_CLIENT or Client("marfoli/CurricuNLP")
                 res = client.predict(text=ch, api_name="/predict")
-                out.extend(res or [])
-                break
-            except Exception:
-                attempt += 1
-                if attempt > retries:
-                    break
-                time.sleep(0.5 * attempt)
-        time.sleep(pause)
-    return _merge_ner(out)
+
+            time.sleep(pause)
+            return _parse_gradio_response(res)
+
+        except Exception as e:
+            last_error = e
+            time.sleep(0.4 * (attempt + 1))
+
+    logger.warning("CurricuNLP chunk failed after retries: %s", last_error)
+    return []
+
+def _flatten_labels(items):
+    flat = []
+    for item in items or []:
+        if isinstance(item, dict):
+            flat.append(item)
+        elif isinstance(item, list):
+            flat.extend(_flatten_labels(item))
+    return flat
+
+
+def call_curriculnlp_on_text(
+        full_text: str,
+        max_chars=40000,
+        chunk_size=2000,
+        overlap=250,
+        pause=0.05,
+        retries=2,
+        workers: Optional[int] = None,
+):
+    cleaned = _clean_pdf_text(full_text)
+    chunks = _chunk_text(
+        cleaned,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        limit=max_chars
+    )[:CURRICUNLP_MAX_CHUNKS]
+
+    if not chunks:
+        return []
+
+    max_workers = _bounded_workers(workers, CURRICUNLP_WORKERS, cap=8)
+    out = []
+
+    if max_workers == 1 or len(chunks) == 1:
+        for ch in chunks:
+            out.extend(_predict_curriculnlp_chunk(ch, retries=retries, pause=pause))
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [
+                ex.submit(_predict_curriculnlp_chunk, ch, retries, pause)
+                for ch in chunks
+            ]
+            for fut in as_completed(futures):
+                out.extend(fut.result() or [])
+
+    flat_out = _flatten_labels(out)
+    return _merge_ner(flat_out)
 
 
 WORLD_UNI_PATH = os.environ.get(
@@ -295,6 +404,7 @@ class CleanRequest(BaseModel):
     inplace: bool = Field(False, description="Overwrite files in-place")
     outdir: Optional[str] = Field(None, description="Output directory if not inplace (default: <folder>/_cleaned)")
     dry_run: bool = Field(False, description="Run without writing files")
+    workers: Optional[int] = Field(None, description="Parallel file cleaners. For Ollama keep this close to OLLAMA_NUM_PARALLEL.")
 
     class Config:
         schema_extra = {
@@ -464,6 +574,12 @@ class SkillListRequest(BaseModel):
 
 class PDFProcessingRequest(BaseModel):
     pdf_name: str
+    max_chars: int = 40000
+    chunk_size: int = 2000
+    overlap: int = 150
+    workers: Optional[int] = None
+    use_ollama_summary: bool = False
+    ollama_model: Optional[str] = None
 
 
 class SkillSearchRequest(BaseModel):
@@ -893,16 +1009,7 @@ def list_pdfs():
 
 @app.post("/process_pdf", tags=["PDF"])
 def process_pdf(request: PDFProcessingRequest):
-    if os.path.isabs(request.pdf_name) and os.path.exists(request.pdf_name):
-        pdf_path = request.pdf_name
-    else:
-        curriculum_folder = "curriculum"
-        os.makedirs(curriculum_folder, exist_ok=True)
-        matches = [f for f in os.listdir(curriculum_folder) if f.endswith(".pdf") and request.pdf_name in f]
-        if not matches:
-            raise HTTPException(status_code=404, detail="PDF not found")
-        pdf_path = os.path.join(curriculum_folder, matches[0])
-
+    pdf_path = _find_pdf_path(request.pdf_name)
     full_text = extract_text_from_pdf_best(pdf_path)
 
     university_name_guess = re.sub(r"[_\W]+", " ", os.path.basename(pdf_path).replace(".pdf", "")).strip()
@@ -911,13 +1018,54 @@ def process_pdf(request: PDFProcessingRequest):
     university_country = meta.get("country")
     domain = meta.get("domain")
 
-    labels = call_curriculnlp_on_text(full_text, chunk_size=2000, overlap=150)
+    labels = call_curriculnlp_on_text(
+        full_text,
+        max_chars=request.max_chars,
+        chunk_size=request.chunk_size,
+        overlap=request.overlap,
+        workers=request.workers,
+    )
 
-    return {
+    response = {
         "file": os.path.basename(pdf_path),
         "university_meta": {"name": university_name, "country": university_country, "domain": domain},
+        "gpu_config": {
+            "ollama_host": os.getenv("OLLAMA_HOST"),
+            "ollama_num_gpu": os.getenv("OLLAMA_NUM_GPU"),
+            "ollama_num_parallel": os.getenv("OLLAMA_NUM_PARALLEL"),
+            "curriculnlp_workers": _bounded_workers(request.workers, CURRICUNLP_WORKERS, cap=8),
+        },
         "labels": labels
     }
+
+    if request.use_ollama_summary:
+        prompt = (
+            "Extract a concise curriculum summary from the following PDF text. "
+            "Return only valid JSON with keys: university, likely_programs, course_topics, notes.\n\n"
+            + _clean_pdf_text(full_text)[:12000]
+        )
+        response["ollama_summary"] = _ollama_generate(prompt, model=request.ollama_model)
+
+    return response
+
+
+@app.get("/gpu/ollama_status", tags=["GPU", "Ollama"])
+def ollama_status():
+    try:
+        return {
+            "status": "ok",
+            "ollama": _ollama_tags(),
+            "env": {
+                "OLLAMA_HOST": os.getenv("OLLAMA_HOST"),
+                "OLLAMA_NUM_GPU": os.getenv("OLLAMA_NUM_GPU"),
+                "OLLAMA_NUM_PARALLEL": os.getenv("OLLAMA_NUM_PARALLEL"),
+                "OLLAMA_MAX_LOADED_MODELS": os.getenv("OLLAMA_MAX_LOADED_MODELS"),
+                "OLLAMA_FLASH_ATTN": os.getenv("OLLAMA_FLASH_ATTN"),
+            },
+            "note": "Also run `nvidia-smi` while processing to confirm GPU utilization."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Ollama is not reachable: {e}")
 
 
 @app.get("/filter_skillnames", tags=["Skills"])
@@ -1004,7 +1152,7 @@ def _extract_urls_for_course(course: dict, field_to_category=FIELD_TO_CATEGORY_D
             return set()
         try:
             extractor_url = os.environ["API_SKILL_EXTRACTOR_BASE_URL"].rstrip("/") + "/extract-skills"
-            resp = requests.post(
+            resp = _http_session.post(
                 extractor_url,
                 headers={"Content-Type": "application/json", "accept": "application/json"},
                 json=[t] if isinstance(t, str) else t,
@@ -2250,9 +2398,25 @@ def clean_degrees(req: CleanRequest):
     totals = {"files": 0, "titles_before": 0, "titles_after": 0, "removed": 0}
     summaries: List[FileSummary] = []
 
-    for in_path in files:
+    # For Ollama, do not blindly use os.cpu_count(); too many concurrent LLM calls
+    # can cause GPU memory thrashing and look like a stall.
+    default_workers = int(os.getenv("OLLAMA_NUM_PARALLEL", "4")) if backend == "ollama" else PDF_CPU_WORKERS
+    max_workers = _bounded_workers(req.workers, default_workers, cap=16)
+
+    def _clean_one(in_path: str) -> Dict[str, Any]:
         out_path = in_path if req.inplace else os.path.join(outdir, os.path.basename(in_path))
-        summary = clean_file(in_path, out_path, backend=backend, model=model, dry_run=req.dry_run)
+        return clean_file(in_path, out_path, backend=backend, model=model, dry_run=req.dry_run)
+
+    if max_workers == 1 or len(files) == 1:
+        iterator = [_clean_one(in_path) for in_path in files]
+    else:
+        iterator = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_clean_one, in_path) for in_path in files]
+            for fut in as_completed(futures):
+                iterator.append(fut.result())
+
+    for summary in iterator:
         totals["files"] += 1
         totals["titles_before"] += summary["original_count"]
         totals["titles_after"] += summary["kept_count"]
@@ -3396,6 +3560,58 @@ def _flatten_values(value):
 
     return [value]
 
+def _guess_lesson_name_from_block(block: str) -> Optional[str]:
+    lines = [l.strip() for l in (block or "").splitlines() if l.strip()]
+
+    skip = re.compile(
+        r"^(ECTS|Credits|Semester|Assessment|Aims|Prerequisites|Module|Course|School|Department|Level|Language)$",
+        re.I
+    )
+
+    code_pat = re.compile(r"^(?:[A-Z]{2,10}\d{3,6}|\d{5,6})$")
+
+    for i, line in enumerate(lines):
+        if code_pat.match(line):
+            for nxt in lines[i + 1:i + 5]:
+                if not code_pat.match(nxt) and not skip.match(nxt) and len(nxt) > 3:
+                    return nxt[:255]
+
+    for line in lines[:15]:
+        if not code_pat.match(line) and not skip.match(line) and len(line) > 3:
+            return line[:255]
+
+    return None
+
+
+def _guess_course_code_from_block(block: str) -> Optional[str]:
+    m = re.search(r"\b([A-Z]{2,10}\d{3,6}|\d{5,6})\b", block or "")
+    return m.group(1) if m else None
+
+def split_course_blocks(text: str) -> List[str]:
+    """
+    Splits curriculum text into probable course/module blocks.
+    Looks for course codes like 052715, COMP10040, CS1234, etc.
+    """
+    text = _clean_pdf_text(text or "")
+
+    pattern = re.compile(
+        r"(?=\n?(?:[A-Z]{2,10}\d{3,6}|\d{5,6})\b)",
+        re.MULTILINE
+    )
+
+    parts = pattern.split(text)
+    blocks = []
+
+    for part in parts:
+        part = part.strip()
+        if len(part) < 150:
+            continue
+
+        if re.search(r"(ECTS|Credits|Semester|Assessment|Learning outcomes|Aims|Prerequisites|Module|Course)", part, re.I):
+            blocks.append(part[:8000])
+
+    return blocks
+
 
 def _labels_to_structured_courses(
         labels: List[Dict[str, Any]],
@@ -3526,6 +3742,115 @@ def _labels_to_structured_courses(
         file_hint=source_file,
         fuzzy_threshold=88
     )
+
+def extract_one_course_with_llm(
+        block: str,
+        university_name: str,
+        source_file: str,
+        website: Optional[str] = None,
+        model: str = "llama3.1"
+) -> Optional[Dict[str, Any]]:
+
+    ollama_url = os.getenv("OLLAMA_URL", "http://172.19.0.1:11434").rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", model)
+
+    prompt = f"""
+You extract exactly ONE university course/module from the text below.
+A course is only valid if it has a title. You MUST identify the title.
+If the course code is present, the title is usually the meaningful line after the code.
+Never return null for lesson_name unless the block is definitely not a course.
+
+Return ONLY valid JSON with exactly this shape:
+{{
+  "lesson_name": null,
+  "course_code": null,
+  "website": null,
+  "ects": null,
+  "language": null,
+  "semester_label": null,
+  "description": null,
+  "objectives": null,
+  "learning_outcomes": null,
+  "course_content": null,
+  "assessment": null,
+  "exam": null,
+  "prerequisites": null,
+  "general_competences": null,
+  "educational_material": null,
+  "professor": [],
+  "msc_bsc": null,
+  "degree_title": null
+}}
+
+Rules:
+- Return one course only.
+- lesson_name must be the title, not the course code.
+- Put the code in course_code.
+- Do not invent missing values.
+- If the text is not a real course/module, return {{"lesson_name": null}}.
+
+University: {university_name}
+Source file: {source_file}
+
+TEXT:
+{block}
+"""
+
+    response = requests.post(
+        f"{ollama_url}/api/generate",
+        json={
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0,
+                "num_predict": 4096
+            }
+        },
+        timeout=None
+    )
+    response.raise_for_status()
+
+    raw = response.json().get("response", "{}")
+    logger.info("OLLAMA ONE COURSE RAW:\n%s", raw[:3000])
+
+    try:
+        course = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON for block:\n%s", raw[:3000])
+        return None
+
+    name = (
+        course.get("lesson_name")
+        or course.get("Course Title")
+        or course.get("Course Name")
+        or course.get("Module Title")
+        or course.get("Title")
+        or _guess_lesson_name_from_block(block)
+    )
+
+    name = str(name or "").strip()
+
+    if not name:
+        logger.warning("Skipping block because no lesson name could be inferred. Block sample:\n%s", block[:1000])
+        return None
+
+    course["lesson_name"] = name[:255]
+
+    if not course.get("course_code"):
+        course["course_code"] = _guess_course_code_from_block(block)
+
+    course["university_name"] = university_name
+    course["source_file"] = source_file
+    course["website"] = course.get("website") or website
+    course["extras"] = course.get("extras") or {}
+
+    if course.get("course_code"):
+        course["extras"]["course_code"] = course["course_code"]
+
+    return course
+
     
 @app.post(
     "/pdf/upload_and_process",
@@ -3606,21 +3931,45 @@ async def upload_pdf_and_process(
     domain = meta.get("domain")
 
     try:
-        labels = call_curriculnlp_on_text(
-            cleaned_text,
-            max_chars=max_chars,
-            chunk_size=chunk_size,
-            overlap=overlap
+        labels = []
+        structured_courses = []
+
+        blocks = split_course_blocks(cleaned_text)
+
+        logger.info("Detected %d possible course blocks", len(blocks))
+
+        for i, block in enumerate(blocks):
+            logger.info("Extracting course block %d/%d chars=%d", i + 1, len(blocks), len(block))
+
+            try:
+                course = extract_one_course_with_llm(
+                    block=block,
+                    university_name=final_university_name,
+                    source_file=os.path.basename(pdf_path),
+                    website=website,
+                    model=os.getenv("OLLAMA_MODEL", "llama3.1")
+                )
+
+                if course:
+                    logger.info("Extracted course: %s", course.get("lesson_name"))
+                    structured_courses.append(course)
+
+            except Exception as e:
+                logger.exception("Failed block %d/%d: %s", i + 1, len(blocks), e)
+
+            if course:
+                logger.info("Extracted course: %s", course.get("lesson_name"))
+                structured_courses.append(course)
+
+        structured_courses = _prepare_and_merge_courses(
+            structured_courses,
+            final_university_name,
+            file_hint=os.path.basename(pdf_path),
+            fuzzy_threshold=88
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"CurricuNLP pipeline failed: {e}")
 
-    structured_courses = _labels_to_structured_courses(
-        labels=labels,
-        university_name=final_university_name,
-        source_file=os.path.basename(pdf_path),
-        website=website
-    )
 
     payload = {
         "university_name": final_university_name,
