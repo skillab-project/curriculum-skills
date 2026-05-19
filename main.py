@@ -158,6 +158,39 @@ def _ensure_text(value: Any) -> str:
         return "\n".join(_ensure_text(v) for v in value if v is not None)
     return str(value)
 
+def _json_safe(obj, seen=None, path="root"):
+    if seen is None:
+        seen = {}
+
+    if isinstance(obj, (dict, list, tuple, set, defaultdict)):
+        obj_id = id(obj)
+        if obj_id in seen:
+            return f"<circular-reference to {seen[obj_id]}>"
+        seen[obj_id] = path
+
+    if isinstance(obj, defaultdict):
+        obj = dict(obj)
+
+    if isinstance(obj, dict):
+        return {
+            str(k): _json_safe(v, seen, f"{path}.{k}")
+            for k, v in obj.items()
+        }
+
+    if isinstance(obj, (list, tuple)):
+        return [
+            _json_safe(v, seen, f"{path}[{i}]")
+            for i, v in enumerate(obj)
+        ]
+
+    if isinstance(obj, set):
+        return [
+            _json_safe(v, seen, f"{path}.set[{i}]")
+            for i, v in enumerate(obj)
+        ]
+
+    return obj
+
 def _find_pdf_path(pdf_name: str, curriculum_folder: str = "curriculum") -> str:
     if os.path.isabs(pdf_name) and os.path.exists(pdf_name):
         return pdf_name
@@ -332,6 +365,16 @@ def _find_uni_by_name(name: str) -> Dict[str, Optional[str]]:
     primary_domain = (domains[0] if domains else None)
     return {"name": it.get("name"), "country": it.get("country"), "domain": primary_domain}
 
+def split_course_blocks_per_page(pages: List[str]) -> List[str]:
+    blocks = []
+
+    for page_no, page_text in enumerate(pages or [], start=1):
+        cleaned_page = _clean_pdf_text(_ensure_text(page_text))
+
+        for block in split_course_blocks(cleaned_page):
+            blocks.append(f"[PAGE {page_no}]\n{block}")
+
+    return blocks
 
 JOIN_SKILL_ON_COURSE = """
 FROM Skill s
@@ -1064,7 +1107,7 @@ def process_pdf(request: PDFProcessingRequest):
         )
         response["ollama_summary"] = _ollama_generate(prompt, model=request.ollama_model)
 
-    return response
+    return JSONResponse(content=_json_safe(response))
 
 
 @app.get("/gpu/ollama_status", tags=["GPU", "Ollama"])
@@ -1140,7 +1183,7 @@ def get_task_status(task_id: str):
     task = TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    return JSONResponse(content=_json_safe(task))
 
 
 FIELD_TO_CATEGORY_DEFAULT = [
@@ -1699,7 +1742,7 @@ def _calc_skillnames_task(
             for fut in as_completed(futs):
                 cid = futs[fut]
                 title = titles.get(cid, f"course_{cid}")
-                results.setdefault(title, defaultdict(list))
+                results.setdefault(title, [])
                 try:
                     names = fut.result()
                     results[title] = names
@@ -1864,11 +1907,11 @@ def search_skill(
 
         freq = Counter([r["university_name"] for r in rows])
 
-        return {
+        return JSONResponse(content=_json_safe({
             "skill_query": skill,
             "universities": out,
             "university_frequency": dict(freq)
-        }
+        }))
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
@@ -1985,7 +2028,10 @@ def search_skill_by_url(
                 "skill_url": r["skill_url"]
             })
 
-        return {"skill_url_query": skill_url, "results": grouped}
+        return JSONResponse(content=_json_safe({
+            "skill_url_query": skill_url,
+            "results": grouped
+        }))
     except mysql.connector.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
@@ -3874,6 +3920,62 @@ TEXT:
 
     return course
 
+def _sanitize_llm_course(course: Dict[str, Any]) -> Dict[str, Any]:
+    course = dict(course or {})
+
+    text_fields = {
+        "description",
+        "objectives",
+        "learning_outcomes",
+        "course_content",
+        "assessment",
+        "exam",
+        "prerequisites",
+        "general_competences",
+        "educational_material",
+    }
+
+    scalar_fields = {
+        "lesson_name",
+        "course_code",
+        "website",
+        "ects",
+        "language",
+        "semester_label",
+        "msc_bsc",
+        "degree_title",
+    }
+
+    for field in text_fields:
+        if field in course:
+            course[field] = _ensure_text(course.get(field)).strip() or None
+
+    for field in scalar_fields:
+        if field in course:
+            value = course.get(field)
+            if isinstance(value, (list, tuple, set)):
+                value = next((str(v).strip() for v in value if str(v).strip()), None)
+            elif value is not None:
+                value = str(value).strip()
+            course[field] = value or None
+
+    professors = course.get("professor") or course.get("professors") or []
+    if isinstance(professors, str):
+        professors = [professors]
+    elif not isinstance(professors, list):
+        professors = [str(professors)]
+
+    course["professor"] = [str(p).strip() for p in professors if str(p).strip()]
+
+    if isinstance(course.get("extras"), dict):
+        course["extras"] = {
+            str(k): _ensure_text(v).strip() if isinstance(v, (list, tuple, set, dict)) else v
+            for k, v in course["extras"].items()
+        }
+
+    return course
+
+
     
 @app.post(
     "/pdf/upload_and_process",
@@ -3890,7 +3992,11 @@ async def upload_pdf_and_process(
         chunk_size: int = Form(2000),
         overlap: int = Form(250),
         max_chars: int = Form(80000),
-        background_tasks: BackgroundTasks = None
+        background_tasks: BackgroundTasks = None,
+        split_mode: Literal["full_text", "per_page"] = Form(
+            "full_text",
+            description="Course splitting mode: full_text = split whole PDF, per_page = split courses page by page"
+        ),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -3902,9 +4008,17 @@ async def upload_pdf_and_process(
 
     with open(pdf_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+        
 
     try:
-        full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
+        if split_mode == "per_page":
+            raw_pages = extract_text_from_pdf(pdf_path)
+            pages = [_ensure_text(p) for p in raw_pages] if isinstance(raw_pages, list) else [_ensure_text(raw_pages)]
+            full_text = "\n".join(pages)
+        else:
+            pages = []
+            full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {e}")
 
@@ -3956,7 +4070,16 @@ async def upload_pdf_and_process(
         labels = []
         structured_courses = []
 
-        blocks = split_course_blocks(cleaned_text)
+        if split_mode == "per_page" and pages:
+            blocks = []
+
+            for page_no, page_text in enumerate(pages, start=1):
+                cleaned_page = _clean_pdf_text(page_text)
+
+                for block in split_course_blocks(cleaned_page):
+                    blocks.append(f"[PAGE {page_no}]\n{block}")
+        else:
+            blocks = split_course_blocks(cleaned_text)
 
         logger.info("Detected %d possible course blocks", len(blocks))
 
@@ -3980,6 +4103,12 @@ async def upload_pdf_and_process(
 
             except Exception as e:
                 logger.exception("Failed block %d/%d: %s", i + 1, len(blocks), e)
+
+        structured_courses = [
+            _sanitize_llm_course(c)
+            for c in structured_courses
+            if c and c.get("lesson_name")
+        ]
 
         structured_courses = _prepare_and_merge_courses(
             structured_courses,
@@ -4009,12 +4138,19 @@ async def upload_pdf_and_process(
             "characters": len(cleaned_text),
             "max_chars_used": max_chars,
             "chunk_size": chunk_size,
-            "overlap": overlap
+            "overlap": overlap,
+            "split_mode": split_mode,
+            "pages_detected": len(pages),
+            "blocks_detected": len(blocks)
         },
         "labels_count": len(labels or []),
         "lesson_count": len(structured_courses),
         "courses": structured_courses
     }
+
+    payload = _json_safe(payload)
+    safe_payload = _json_safe(payload)
+    logger.info("SAFE PAYLOAD: %s", json.dumps(safe_payload)[:5000])
 
     if save_to_db:
         if not is_database_connected(DB_CONFIG):
@@ -4037,7 +4173,9 @@ async def upload_pdf_and_process(
             "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress."
         }
 
-    return payload
+    return JSONResponse(content=_json_safe(payload))
+
+
 
 @app.get("/db/ping", tags=["Debug"])
 def db_ping():
