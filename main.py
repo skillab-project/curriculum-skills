@@ -3751,7 +3751,12 @@ def extract_one_course_with_llm(
         model: str = "llama3.1"
 ) -> Optional[Dict[str, Any]]:
 
-    ollama_url = os.getenv("OLLAMA_URL", "http://172.19.0.1:11434").rstrip("/")
+    ollama_url = (
+        os.getenv("OLLAMA_HOST")
+        or os.getenv("OLLAMA_BASE_URL")
+        or os.getenv("OLLAMA_URL")
+        or "http://host.docker.internal:11434"
+    ).rstrip("/")
     model = os.getenv("OLLAMA_MODEL", model)
 
     prompt = f"""
@@ -3941,13 +3946,15 @@ async def upload_pdf_and_process(
         for i, block in enumerate(blocks):
             logger.info("Extracting course block %d/%d chars=%d", i + 1, len(blocks), len(block))
 
+            course = None
+
             try:
                 course = extract_one_course_with_llm(
                     block=block,
                     university_name=final_university_name,
                     source_file=os.path.basename(pdf_path),
                     website=website,
-                    model=os.getenv("OLLAMA_MODEL", "llama3.1")
+                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b")
                 )
 
                 if course:
@@ -3956,10 +3963,6 @@ async def upload_pdf_and_process(
 
             except Exception as e:
                 logger.exception("Failed block %d/%d: %s", i + 1, len(blocks), e)
-
-            if course:
-                logger.info("Extracted course: %s", course.get("lesson_name"))
-                structured_courses.append(course)
 
         structured_courses = _prepare_and_merge_courses(
             structured_courses,
