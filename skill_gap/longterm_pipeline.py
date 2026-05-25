@@ -5,7 +5,7 @@ Unified module combining:
   - curriculum_services.py
   - curriculum_router.py
   - longterm_full_pipeline_router.py
- 
+
 Exports two routers — include in main.py:
   - curriculum_router       →  prefix /curriculum
   - full_pipeline_router    →  prefix /longterm
@@ -340,6 +340,84 @@ def _run_gap_analysis(
     return {"info": result["error"]} if "error" in result else result
 
 
+def _compare_skills_list_with_trends(
+    curriculum_skill_labels: List[str],
+    trend_skill_labels: List[str],
+    fuzzy_threshold: int
+) -> Dict[str, Any]:
+    """Wrapper used when curriculum skills come from a one-off source (PDF/JSON upload)."""
+    if not trend_skill_labels:
+        return {"info": "No trend skills available for comparison."}
+    if not curriculum_skill_labels:
+        return {"info": "No curriculum skills available for comparison."}
+    return compare_curriculum_with_trends(
+        curriculum_skill_labels, trend_skill_labels, fuzzy_threshold
+    )
+
+
+def _fetch_trends_from_job(
+    job_id: str,
+    user_id: str,
+    top_n: int,
+    esco_threshold: float,
+    target: str,
+    similarity_threshold: float,
+    max_actions_per_tech: int,
+) -> Dict[str, Any]:
+    """
+    Calls map-to-esco + policy/recommendations for an EXISTING job_id.
+    Returns dict with: esco_result, forecast_skill_labels, policy_result, policy_skill_labels.
+
+    Persists analysis + policy under the user's storage folder so the existing
+    /compare/job endpoint keeps working afterwards.
+    """
+    # FORECAST TRENDS
+    logger.info(f"[trends-only] map_to_esco job={job_id}")
+    try:
+        esco_result = map_to_esco(job_id, top_n=top_n, threshold=esco_threshold, target=target)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"map_to_esco failed: {e}")
+
+    forecast_skill_labels = _extract_skill_labels_from_esco(esco_result, threshold=esco_threshold)
+    logger.info(f"[trends-only] {len(forecast_skill_labels)} forecast skill labels")
+
+    # persist (so existing /compare/job keeps working)
+    stored = get_analysis_by_job(user_id, job_id) or {
+        "job_id": job_id, "user_id": user_id, "filename": None,
+        "status": "done", "message": None, "download": None,
+    }
+    stored["esco_mapping"] = esco_result
+    save_analysis(user_id, job_id, stored)
+
+    # POLICY TRENDS
+    logger.info(f"[trends-only] policy_recommendations job={job_id}")
+    try:
+        policy_result = generate_policy_recommendations(
+            job_id=job_id, user_id=user_id, target=target,
+            similarity_threshold=similarity_threshold,
+            max_actions_per_tech=max_actions_per_tech,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"policy_recommendations failed: {e}")
+
+    save_policy(user_id, job_id, {
+        "job_id": job_id, "user_id": user_id, "target": target,
+        "similarity_threshold": similarity_threshold,
+        "max_actions_per_tech": max_actions_per_tech,
+        "recommendations": policy_result,
+    })
+
+    policy_skill_labels = _extract_policy_skill_labels(policy_result)
+    logger.info(f"[trends-only] {len(policy_skill_labels)} policy skill labels")
+
+    return {
+        "esco_result": esco_result,
+        "forecast_skill_labels": forecast_skill_labels,
+        "policy_result": policy_result,
+        "policy_skill_labels": policy_skill_labels,
+    }
+
+
 # ==============================================================================
 # CURRICULUM ROUTER   →  app.include_router(curriculum_router)
 # ==============================================================================
@@ -621,6 +699,186 @@ async def run_full_pipeline(
         },
         "policy_trends": {
             "recommendations": policy_result,
+            "skill_labels": policy_skill_labels,
+            "skill_count": len(policy_skill_labels),
+        },
+        "gap_analysis": {
+            "vs_forecast_trends": gap_vs_forecast,
+            "vs_policy_trends": gap_vs_policy,
+        },
+    }
+
+
+# ==============================================================================
+# NEW: Trends-only pipeline (starts from an EXISTING job_id)
+# ==============================================================================
+
+class RunFromJobRequest(BaseModel):
+    user_id: str
+    job_id: str
+    curriculum_id: Optional[str] = None  # if None → compare against ALL user curricula
+    top_n: int = 5
+    esco_threshold: float = 0.4
+    fuzzy_threshold: int = 80
+    target: str = "both"  # 'occupations' | 'skills' | 'both'
+    similarity_threshold: float = 0.5
+    max_actions_per_tech: int = 5
+
+
+@full_pipeline_router.post(
+    "/run-from-job",
+    summary="Run pipeline from an EXISTING job_id (curricula from DB) → ESCO + policy → gap analysis"
+)
+def run_from_job(req: RunFromJobRequest):
+    """
+    Same as `/run-full-pipeline`, **but skips PDF analysis & polling**.
+
+    You provide:
+      - `user_id`
+      - `job_id` (file id of an ALREADY analyzed PDF on SKILLAB portal)
+
+    The endpoint will:
+      1. Call `/map-to-esco`         → FORECAST TRENDS
+      2. Call `/policy/recommendations` → POLICY TRENDS
+      3. Compare against user's stored curricula (single via `curriculum_id`,
+         or ALL if omitted)
+    """
+    trends = _fetch_trends_from_job(
+        job_id=req.job_id,
+        user_id=req.user_id,
+        top_n=req.top_n,
+        esco_threshold=req.esco_threshold,
+        target=req.target,
+        similarity_threshold=req.similarity_threshold,
+        max_actions_per_tech=req.max_actions_per_tech,
+    )
+
+    forecast_skill_labels = trends["forecast_skill_labels"]
+    policy_skill_labels = trends["policy_skill_labels"]
+
+    gap_vs_forecast = _run_gap_analysis(
+        req.user_id, req.curriculum_id, forecast_skill_labels, req.fuzzy_threshold
+    )
+    gap_vs_policy = _run_gap_analysis(
+        req.user_id, req.curriculum_id, policy_skill_labels, req.fuzzy_threshold
+    )
+
+    return {
+        "job_id": req.job_id,
+        "user_id": req.user_id,
+        "curriculum_id": req.curriculum_id or "all",
+        "source": "existing_job",
+        "forecast_trends": {
+            "esco_mapping": trends["esco_result"],
+            "skill_labels": forecast_skill_labels,
+            "skill_count": len(forecast_skill_labels),
+        },
+        "policy_trends": {
+            "recommendations": trends["policy_result"],
+            "skill_labels": policy_skill_labels,
+            "skill_count": len(policy_skill_labels),
+        },
+        "gap_analysis": {
+            "vs_forecast_trends": gap_vs_forecast,
+            "vs_policy_trends": gap_vs_policy,
+        },
+    }
+
+
+@full_pipeline_router.post(
+    "/run-from-job/upload",
+    summary="Same as /run-from-job, but accepts curriculum from a PDF or JSON upload (ad-hoc, not stored)"
+)
+async def run_from_job_with_upload(
+    file: UploadFile = File(..., description="Curriculum file (PDF or JSON)"),
+    user_id: str = Form(..., description="User ID (used for SKILLAB API & storage)"),
+    job_id: str = Form(..., description="Existing SKILLAB job_id of analyzed PDF"),
+    top_n: int = Form(5),
+    esco_threshold: float = Form(0.4),
+    fuzzy_threshold: int = Form(80),
+    target: str = Form("both"),
+    similarity_threshold: float = Form(0.5),
+    max_actions_per_tech: int = Form(5),
+):
+    """
+    Compares an ad-hoc uploaded curriculum (PDF or JSON) against an existing
+    SKILLAB job's forecast + policy trends. The uploaded curriculum is **not**
+    persisted to user storage.
+    """
+    filename = (file.filename or "").lower()
+    if not (filename.endswith(".pdf") or filename.endswith(".json")):
+        raise HTTPException(status_code=400, detail="Only PDF or JSON files are accepted.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The file is empty.")
+
+    # 1) Extract curriculum skill labels (ad-hoc, not stored)
+    curriculum_skill_labels: List[str] = []
+    curriculum_source: Dict[str, Any] = {"filename": file.filename}
+
+    if filename.endswith(".json"):
+        try:
+            skills_json = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+        curriculum_skill_labels = extract_skills_from_json(skills_json)
+        curriculum_source["type"] = "json"
+    else:
+        try:
+            result = extract_skills_from_pdf_via_trends(
+                content, file.filename, user_id,
+                top_n=10, threshold=esco_threshold, target="skills"
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Error extracting skills from PDF: {e}")
+        curriculum_skill_labels = [
+            s.get("skill_label") for s in result.get("skills", []) if s.get("skill_label")
+        ]
+        curriculum_source["type"] = "pdf"
+        curriculum_source["curriculum_job_id"] = result.get("job_id")
+
+    if not curriculum_skill_labels:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract any curriculum skills from the uploaded file."
+        )
+
+    # 2) Fetch FORECAST + POLICY trends from the existing job_id
+    trends = _fetch_trends_from_job(
+        job_id=job_id,
+        user_id=user_id,
+        top_n=top_n,
+        esco_threshold=esco_threshold,
+        target=target,
+        similarity_threshold=similarity_threshold,
+        max_actions_per_tech=max_actions_per_tech,
+    )
+
+    forecast_skill_labels = trends["forecast_skill_labels"]
+    policy_skill_labels = trends["policy_skill_labels"]
+
+    # 3) Compare
+    gap_vs_forecast = _compare_skills_list_with_trends(
+        curriculum_skill_labels, forecast_skill_labels, fuzzy_threshold
+    )
+    gap_vs_policy = _compare_skills_list_with_trends(
+        curriculum_skill_labels, policy_skill_labels, fuzzy_threshold
+    )
+
+    return {
+        "job_id": job_id,
+        "user_id": user_id,
+        "curriculum_source": curriculum_source,
+        "curriculum_skill_count": len(curriculum_skill_labels),
+        "source": "existing_job + ad_hoc_upload",
+        "forecast_trends": {
+            "esco_mapping": trends["esco_result"],
+            "skill_labels": forecast_skill_labels,
+            "skill_count": len(forecast_skill_labels),
+        },
+        "policy_trends": {
+            "recommendations": trends["policy_result"],
             "skill_labels": policy_skill_labels,
             "skill_count": len(policy_skill_labels),
         },
