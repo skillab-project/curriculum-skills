@@ -787,12 +787,13 @@ def run_from_job(req: RunFromJobRequest):
 
 @full_pipeline_router.post(
     "/run-from-job/upload",
-    summary="Same as /run-from-job, but accepts curriculum from a PDF or JSON upload (ad-hoc, not stored)"
+    summary="Upload curriculum (PDF/JSON) → STORE it → compare vs existing job_id trends"
 )
 async def run_from_job_with_upload(
     file: UploadFile = File(..., description="Curriculum file (PDF or JSON)"),
     user_id: str = Form(..., description="User ID (used for SKILLAB API & storage)"),
     job_id: str = Form(..., description="Existing SKILLAB job_id of analyzed PDF"),
+    curriculum_name: str = Form(None, description="Optional human-readable name for the curriculum"),
     top_n: int = Form(5),
     esco_threshold: float = Form(0.4),
     fuzzy_threshold: int = Form(80),
@@ -801,9 +802,14 @@ async def run_from_job_with_upload(
     max_actions_per_tech: int = Form(5),
 ):
     """
-    Compares an ad-hoc uploaded curriculum (PDF or JSON) against an existing
-    SKILLAB job's forecast + policy trends. The uploaded curriculum is **not**
-    persisted to user storage.
+    Uploads a curriculum (PDF or JSON), **stores it** under the user's curricula
+    (same as `/curriculum/upload/pdf` and `/curriculum/upload/json`) and then
+    compares it against an EXISTING SKILLAB job's forecast + policy trends.
+
+    After this call the curriculum is permanently available via:
+      - GET    /curriculum/{user_id}
+      - GET    /curriculum/{user_id}/{curriculum_id}
+      - DELETE /curriculum/{user_id}/{curriculum_id}
     """
     filename = (file.filename or "").lower()
     if not (filename.endswith(".pdf") or filename.endswith(".json")):
@@ -813,9 +819,9 @@ async def run_from_job_with_upload(
     if not content:
         raise HTTPException(status_code=400, detail="The file is empty.")
 
-    # 1) Extract curriculum skill labels (ad-hoc, not stored)
+    # 1) Extract curriculum skills AND store the curriculum (same as /curriculum/upload/*)
+    curriculum_id = str(uuid.uuid4())[:8]
     curriculum_skill_labels: List[str] = []
-    curriculum_source: Dict[str, Any] = {"filename": file.filename}
 
     if filename.endswith(".json"):
         try:
@@ -823,7 +829,19 @@ async def run_from_job_with_upload(
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
         curriculum_skill_labels = extract_skills_from_json(skills_json)
-        curriculum_source["type"] = "json"
+        if not curriculum_skill_labels:
+            raise HTTPException(status_code=400, detail="No skills found in the JSON file.")
+        curriculum_data = {
+            "curriculum_id": curriculum_id, "user_id": user_id,
+            "filename": file.filename, "curriculum_name": curriculum_name or file.filename,
+            "job_id": None,
+            "skills": [
+                {"skill_label": s, "score": 1.0, "source_technology": "uploaded"}
+                for s in curriculum_skill_labels
+            ],
+            "skill_count": len(curriculum_skill_labels),
+            "esco_mapping": None,
+        }
     else:
         try:
             result = extract_skills_from_pdf_via_trends(
@@ -835,14 +853,22 @@ async def run_from_job_with_upload(
         curriculum_skill_labels = [
             s.get("skill_label") for s in result.get("skills", []) if s.get("skill_label")
         ]
-        curriculum_source["type"] = "pdf"
-        curriculum_source["curriculum_job_id"] = result.get("job_id")
+        if not curriculum_skill_labels:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract any curriculum skills from the uploaded PDF."
+            )
+        curriculum_data = {
+            "curriculum_id": curriculum_id, "user_id": user_id,
+            "filename": file.filename, "curriculum_name": curriculum_name or file.filename,
+            "job_id": result.get("job_id"),
+            "skills": result.get("skills", []),
+            "skill_count": result.get("skill_count", 0),
+            "esco_mapping": result.get("esco_mapping"),
+        }
 
-    if not curriculum_skill_labels:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract any curriculum skills from the uploaded file."
-        )
+    save_curriculum(user_id, curriculum_id, curriculum_data)
+    logger.info(f"[run-from-job/upload] Stored curriculum_id={curriculum_id} user={user_id}")
 
     # 2) Fetch FORECAST + POLICY trends from the existing job_id
     trends = _fetch_trends_from_job(
@@ -869,9 +895,13 @@ async def run_from_job_with_upload(
     return {
         "job_id": job_id,
         "user_id": user_id,
-        "curriculum_source": curriculum_source,
+        "curriculum_id": curriculum_id,
+        "curriculum_name": curriculum_data.get("curriculum_name"),
+        "filename": file.filename,
         "curriculum_skill_count": len(curriculum_skill_labels),
-        "source": "existing_job + ad_hoc_upload",
+        "skills_preview": curriculum_skill_labels[:5],
+        "full_curriculum_endpoint": f"/curriculum/{user_id}/{curriculum_id}",
+        "source": "existing_job + stored_upload",
         "forecast_trends": {
             "esco_mapping": trends["esco_result"],
             "skill_labels": forecast_skill_labels,
