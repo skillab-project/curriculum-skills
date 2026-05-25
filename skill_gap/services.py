@@ -132,7 +132,7 @@ def _fetch_skills_for_occupation(occupation: str, min_val: float) -> tuple:
         resp = requests.post(
             f"{SERVICE2_URL}/required_skills_service",
             json={"occupation_name": occupation},
-            timeout=30
+            timeout=80
         )
         if resp.status_code == 200 and resp.text:
             data = resp.json()
@@ -194,7 +194,7 @@ def _get_skill_job_count(skill_id: str, token: str) -> int:
         data = f"skill_ids={requests.utils.quote(skill_id)}&skill_ids_logic=or"
         resp = requests.post(
             f"{TRACKER_BASE_URL}/jobs?page=1&page_size=1",
-            headers=headers, data=data, verify=False, timeout=20
+            headers=headers, data=data, verify=False, timeout=80
         )
         if resp.ok:
             count = resp.json().get("count", 0)
@@ -221,7 +221,7 @@ def _get_skill_profile_count(skill_id: str, token: str) -> int:
         data = f"skill_ids={requests.utils.quote(skill_id)}&skill_ids_logic=or"
         resp = requests.post(
             f"{TRACKER_BASE_URL}/profiles?page=1&page_size=1",
-            headers=headers, data=data, verify=False, timeout=20
+            headers=headers, data=data, verify=False, timeout=80
         )
         if resp.ok:
             count = resp.json().get("count", 0)
