@@ -11,9 +11,6 @@ RUN apt-get update && apt-get install -y ca-certificates curl gnupg && \
     apt-get update && apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm i --omit=dev; fi
-
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

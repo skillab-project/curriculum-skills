@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Query, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, AnyUrl
 from typing import List, Dict, Optional, Literal, Set, Any
@@ -85,14 +85,14 @@ from output import (
     _load_universities
 )
 from config import DB_CONFIG
+
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from datetime import datetime
 
-from recommendation_system.backend.routers.electives import router as electives_router
-from recommendation_system.backend.routers.filters import router as filters_router
-from recommendation_system.backend.routers.recommendations import router as recommendations_router
+
+
 from policy import router as policy_router
 
 from skill_gap.router import router as skill_gap_router
@@ -202,6 +202,39 @@ def _find_pdf_path(pdf_name: str, curriculum_folder: str = "curriculum") -> str:
     if not matches:
         raise HTTPException(status_code=404, detail="PDF not found")
     return os.path.join(curriculum_folder, matches[0])
+
+def _extract_json_array(raw: str) -> List[Dict[str, Any]]:
+    """
+    Extract first JSON array from LLM output safely.
+    """
+
+    if not raw:
+        return []
+
+    raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+
+    match = re.search(r"\[[\s\S]*\]", raw)
+
+    if not match:
+        return []
+
+    candidate = match.group(0)
+
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        return []
+
+    return []
 
 def _ollama_generate(prompt: str, model: Optional[str] = None, temperature: float = 0.0) -> str:
     base = (os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
@@ -395,23 +428,419 @@ app = FastAPI(
     root_path="/curriculum-skills"
 )
 
-app.include_router(
-    electives_router,
-    prefix="/recommendation/electives",
-    tags=["Recommendation"]
-)
 
-app.include_router(
-    filters_router,
-    prefix="/recommendation/filters",
-    tags=["Recommendation"]
-)
+# -----------------------------------------------------------------------------
+# Recommendation endpoints backed directly by the SkillCrawl MySQL schema
+# -----------------------------------------------------------------------------
+# These endpoints recommend COURSES. Endpoints that expose/filter by degrees are
+# preserved, but degree names are read from Course.degree_titles, not from
+# DegreeProgram, so they work even when degree/program rows are sparse.
+recommendation_filters_router = APIRouter(prefix="/recommendation/filters", tags=["Recommendation"])
+recommendation_courses_router = APIRouter(prefix="/recommendation", tags=["Recommendation"])
+recommendation_electives_router = APIRouter(prefix="/recommendation/electives", tags=["Recommendation"])
 
-app.include_router(
-    recommendations_router,
-    prefix="/recommendation",
-    tags=["Recommendation"]
-)
+
+def _rec_conn():
+    try:
+        return mysql.connector.connect(**DB_CONFIG)
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Recommendation DB connection failed: {e}")
+
+
+def _json_values(value: Any) -> List[str]:
+    """Return clean string values from JSON/text fields such as Course.degree_titles."""
+    if value is None:
+        return []
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = raw
+    else:
+        parsed = value
+
+    out: List[str] = []
+
+    def walk(x):
+        if x is None:
+            return
+        if isinstance(x, str):
+            s = x.strip()
+            if s:
+                out.append(s)
+        elif isinstance(x, (int, float)):
+            out.append(str(x))
+        elif isinstance(x, dict):
+            for key in ("title", "name", "degree_title", "degree", "label", "value"):
+                if key in x:
+                    walk(x[key])
+            if not any(k in x for k in ("title", "name", "degree_title", "degree", "label", "value")):
+                for v in x.values():
+                    walk(v)
+        elif isinstance(x, (list, tuple, set)):
+            for item in x:
+                walk(item)
+
+    walk(parsed)
+    return sorted({x for x in out if x})
+
+
+def _course_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    degree_titles = _json_values(row.get("degree_titles"))
+    skills = _json_values(row.get("skills_json"))
+    ects = _json_values(row.get("ects_list"))
+    mand_opt = _json_values(row.get("mand_opt_list"))
+    msc_bsc = _json_values(row.get("msc_bsc_list"))
+
+    return {
+        "course_id": row.get("course_id"),
+        "lesson_name": row.get("lesson_name"),
+        "course_name": row.get("lesson_name"),
+        "university_id": row.get("university_id"),
+        "university_name": row.get("university_name"),
+        "country": row.get("country"),
+        "degree_titles": degree_titles,
+        "degree_names": degree_titles,
+        "language": row.get("language"),
+        "website": row.get("website"),
+        "semester_number": row.get("semester_number"),
+        "semester_label": row.get("semester_label"),
+        "ects": ects,
+        "mand_opt": mand_opt,
+        "msc_bsc": msc_bsc,
+        "description": row.get("description"),
+        "learning_outcomes": row.get("learning_outcomes"),
+        "course_content": row.get("course_content"),
+        "skills": skills,
+        "score": float(row.get("score") or 0),
+    }
+
+
+def _fetch_courses(
+    country: Optional[str] = None,
+    university: Optional[str] = None,
+    degree: Optional[str] = None,
+    skill: Optional[str] = None,
+    query: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+
+    where = []
+    params: List[Any] = []
+
+    if country:
+        where.append("LOWER(u.country) LIKE LOWER(%s)")
+        params.append(f"%{country}%")
+
+    if university:
+        where.append("LOWER(u.university_name) LIKE LOWER(%s)")
+        params.append(f"%{university}%")
+
+    if degree:
+        # Course.degree_titles is JSON but may contain arrays/objects/strings.
+        where.append("LOWER(CAST(c.degree_titles AS CHAR)) LIKE LOWER(%s)")
+        params.append(f"%{degree}%")
+
+    if skill:
+        where.append(
+            """EXISTS (
+                SELECT 1
+                FROM CourseSkill cs2
+                JOIN Skill s2 ON s2.skill_id = cs2.skill_id
+                WHERE cs2.course_id = c.course_id
+                  AND LOWER(s2.skill_name) LIKE LOWER(%s)
+            )"""
+        )
+        params.append(f"%{skill}%")
+
+    score_expr = "0"
+    if query:
+        like = f"%{query}%"
+        where.append(
+            """(
+                LOWER(c.lesson_name) LIKE LOWER(%s)
+                OR LOWER(COALESCE(c.description, '')) LIKE LOWER(%s)
+                OR LOWER(COALESCE(c.learning_outcomes, '')) LIKE LOWER(%s)
+                OR LOWER(COALESCE(c.course_content, '')) LIKE LOWER(%s)
+                OR LOWER(CAST(c.degree_titles AS CHAR)) LIKE LOWER(%s)
+                OR EXISTS (
+                    SELECT 1
+                    FROM CourseSkill cs3
+                    JOIN Skill s3 ON s3.skill_id = cs3.skill_id
+                    WHERE cs3.course_id = c.course_id
+                      AND LOWER(s3.skill_name) LIKE LOWER(%s)
+                )
+            )"""
+        )
+        params.extend([like, like, like, like, like, like])
+        score_expr = """
+            (
+                CASE WHEN LOWER(c.lesson_name) LIKE LOWER(%s) THEN 50 ELSE 0 END +
+                CASE WHEN LOWER(CAST(c.degree_titles AS CHAR)) LIKE LOWER(%s) THEN 25 ELSE 0 END +
+                CASE WHEN LOWER(COALESCE(c.learning_outcomes, '')) LIKE LOWER(%s) THEN 15 ELSE 0 END +
+                CASE WHEN LOWER(COALESCE(c.description, '')) LIKE LOWER(%s) THEN 10 ELSE 0 END
+            )
+        """
+        score_params = [like, like, like, like]
+    else:
+        score_params = []
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    sql = f"""
+        SELECT
+            c.course_id,
+            c.university_id,
+            c.lesson_name,
+            c.language,
+            c.website,
+            c.semester_number,
+            c.semester_label,
+            c.ects_list,
+            c.mand_opt_list,
+            c.msc_bsc_list,
+            c.description,
+            c.learning_outcomes,
+            c.course_content,
+            c.degree_titles,
+            u.university_name,
+            u.country,
+            COALESCE(JSON_ARRAYAGG(DISTINCT s.skill_name), JSON_ARRAY()) AS skills_json,
+            {score_expr} AS score
+        FROM Course c
+        JOIN University u ON u.university_id = c.university_id
+        LEFT JOIN CourseSkill cs ON cs.course_id = c.course_id
+        LEFT JOIN Skill s ON s.skill_id = cs.skill_id
+        {where_sql}
+        GROUP BY
+            c.course_id, c.university_id, c.lesson_name, c.language, c.website,
+            c.semester_number, c.semester_label, c.ects_list, c.mand_opt_list,
+            c.msc_bsc_list, c.description, c.learning_outcomes, c.course_content,
+            c.degree_titles, u.university_name, u.country
+        ORDER BY score DESC, u.university_name ASC, c.lesson_name ASC
+        LIMIT %s
+    """
+
+    conn = _rec_conn()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(sql, tuple(score_params + params + [limit]))
+        return [_course_row_to_dict(r) for r in (cur.fetchall() or [])]
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Recommendation query failed: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+
+@recommendation_filters_router.get("/filters/countries")
+@recommendation_filters_router.get("/countries")
+def recommendation_countries():
+    conn = _rec_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT country
+            FROM University
+            WHERE country IS NOT NULL AND country <> ''
+            ORDER BY country
+        """)
+        return {"countries": [r[0] for r in cur.fetchall()]}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@recommendation_filters_router.get("/filters/universities")
+@recommendation_filters_router.get("/universities")
+def recommendation_universities(country: Optional[str] = Query(None)):
+    conn = _rec_conn()
+    cur = conn.cursor(dictionary=True)
+    try:
+        if country:
+            cur.execute("""
+                SELECT DISTINCT university_id, university_name, country
+                FROM University
+                WHERE LOWER(country) LIKE LOWER(%s)
+                ORDER BY university_name
+            """, (f"%{country}%",))
+        else:
+            cur.execute("""
+                SELECT DISTINCT university_id, university_name, country
+                FROM University
+                ORDER BY university_name
+            """)
+        return {"universities": cur.fetchall()}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@recommendation_filters_router.get("/filters/degrees")
+@recommendation_filters_router.get("/degrees")
+def recommendation_degrees(
+    country: Optional[str] = Query(None),
+    university: Optional[str] = Query(None),
+):
+    # Degree names intentionally come from Course.degree_titles.
+    courses = _fetch_courses(country=country, university=university, limit=200)
+    degrees = sorted({
+        degree
+        for course in courses
+        for degree in (course.get("degree_titles") or [])
+        if degree
+    })
+    return {"degrees": degrees, "source": "Course.degree_titles"}
+
+
+@recommendation_filters_router.get("/filters/skills")
+@recommendation_filters_router.get("/skills")
+def recommendation_skills(
+    country: Optional[str] = Query(None),
+    university: Optional[str] = Query(None),
+    degree: Optional[str] = Query(None),
+):
+    where = []
+    params: List[Any] = []
+    if country:
+        where.append("LOWER(u.country) LIKE LOWER(%s)")
+        params.append(f"%{country}%")
+    if university:
+        where.append("LOWER(u.university_name) LIKE LOWER(%s)")
+        params.append(f"%{university}%")
+    if degree:
+        where.append("LOWER(CAST(c.degree_titles AS CHAR)) LIKE LOWER(%s)")
+        params.append(f"%{degree}%")
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    conn = _rec_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"""
+            SELECT DISTINCT s.skill_name
+            FROM Skill s
+            JOIN CourseSkill cs ON cs.skill_id = s.skill_id
+            JOIN Course c ON c.course_id = cs.course_id
+            JOIN University u ON u.university_id = c.university_id
+            {where_sql}
+            ORDER BY s.skill_name
+        """, tuple(params))
+        return {"skills": [r[0] for r in cur.fetchall() if r[0]]}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@recommendation_courses_router.get("/courses")
+@recommendation_courses_router.get("/recommendations/courses")
+@recommendation_electives_router.get("/courses")
+def recommend_courses(
+    q: Optional[str] = Query(None, description="Text query matched against course text, degree names, and skills"),
+    skill: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    university: Optional[str] = Query(None),
+    degree: Optional[str] = Query(None, description="Matched against Course.degree_titles"),
+    limit: int = Query(25, ge=1, le=200),
+):
+    courses = _fetch_courses(
+        country=country,
+        university=university,
+        degree=degree,
+        skill=skill,
+        query=q,
+        limit=limit,
+    )
+    return {
+        "type": "course_recommendations",
+        "count": len(courses),
+        "filters": {
+            "q": q,
+            "skill": skill,
+            "country": country,
+            "university": university,
+            "degree": degree,
+            "degree_source": "Course.degree_titles",
+        },
+        "courses": courses,
+    }
+
+
+@recommendation_courses_router.get("/degrees")
+@recommendation_courses_router.get("/recommendations/degrees")
+def recommend_degrees_from_courses(
+    q: Optional[str] = Query(None),
+    skill: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    university: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    # Kept for compatibility: returns degree names, but calculates them from
+    # matching courses and includes representative courses.
+    courses = _fetch_courses(
+        country=country,
+        university=university,
+        skill=skill,
+        query=q,
+        limit=limit,
+    )
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for course in courses:
+        degree_names = course.get("degree_titles") or ["Unknown degree"]
+        for degree_name in degree_names:
+            item = grouped.setdefault(degree_name, {
+                "degree_name": degree_name,
+                "source": "Course.degree_titles",
+                "course_count": 0,
+                "courses": [],
+            })
+            item["course_count"] += 1
+            if len(item["courses"]) < 10:
+                item["courses"].append(course)
+
+    degrees = sorted(grouped.values(), key=lambda x: (-x["course_count"], x["degree_name"]))
+    return {
+        "type": "degree_recommendations_from_courses",
+        "count": len(degrees),
+        "degrees": degrees,
+    }
+
+
+@recommendation_courses_router.post("/recommend")
+@recommendation_courses_router.post("/recommendations")
+@recommendation_electives_router.post("/recommend")
+def recommend_courses_post(payload: Dict[str, Any] = Body(default_factory=dict)):
+    q = payload.get("q") or payload.get("query") or payload.get("text")
+    skill = payload.get("skill")
+    country = payload.get("country")
+    university = payload.get("university") or payload.get("university_name")
+    degree = payload.get("degree") or payload.get("degree_name") or payload.get("degree_title")
+    limit = int(payload.get("limit") or 25)
+
+    courses = _fetch_courses(
+        country=country,
+        university=university,
+        degree=degree,
+        skill=skill,
+        query=q,
+        limit=limit,
+    )
+    return {
+        "type": "course_recommendations",
+        "count": len(courses),
+        "courses": courses,
+    }
+
+
+app.include_router(recommendation_filters_router)
+app.include_router(recommendation_courses_router)
+app.include_router(recommendation_electives_router)
 
 app.include_router(
     policy_router,
@@ -1211,35 +1640,52 @@ def _extract_urls_for_course(course: dict, field_to_category=FIELD_TO_CATEGORY_D
         t = (text or "").strip()
         if not t:
             return set()
+
+        base = os.getenv("API_SKILL_EXTRACTOR_BASE_URL")
+        if not base:
+            logger.error("API_SKILL_EXTRACTOR_BASE_URL is missing")
+            return set()
+
+        extractor_url = base.rstrip("/") + "/extract-skills"
+
         try:
-            extractor_url = os.environ["API_SKILL_EXTRACTOR_BASE_URL"].rstrip("/") + "/extract-skills"
             resp = _http_session.post(
                 extractor_url,
                 headers={"Content-Type": "application/json", "accept": "application/json"},
-                json=[t] if isinstance(t, str) else t,
+                json=[t],
                 verify=False,
                 timeout=60
             )
-            urls: Set[str] = set()
-            if resp.ok:
-                data = resp.json()
-                if isinstance(data, list):
-                    for group in data:
-                        if isinstance(group, list):
-                            for su in group:
-                                if isinstance(su, str):
-                                    urls.add(su)
-                elif isinstance(data, dict) and "items" in data:
-                    for it in data["items"]:
-                        ids = it.get("id") or []
-                        if isinstance(ids, list):
-                            for su in ids:
-                                if isinstance(su, str):
-                                    urls.add(su)
-            return urls
-        except Exception:
-            return set()
 
+            if not resp.ok:
+                logger.error("Skill extractor failed: %s %s", resp.status_code, resp.text[:500])
+                return set()
+
+            data = resp.json()
+            urls = set()
+
+            if isinstance(data, list):
+                for group in data:
+                    if isinstance(group, list):
+                        urls.update(su for su in group if isinstance(su, str))
+                    elif isinstance(group, str):
+                        urls.add(group)
+
+            elif isinstance(data, dict):
+                for it in data.get("items", []):
+                    ids = it.get("id") or it.get("ids") or []
+                    if isinstance(ids, str):
+                        urls.add(ids)
+                    elif isinstance(ids, list):
+                        urls.update(su for su in ids if isinstance(su, str))
+
+            logger.info("Extractor returned %d skill URLs", len(urls))
+            return urls
+
+        except Exception as e:
+            logger.exception("Skill extraction failed")
+            return set()
+    
     for field, cat in field_to_category:
         urls = _extract_urls_from_text(course.get(field))
         for u in urls:
@@ -1453,6 +1899,440 @@ def _calc_all_skillnames_task_parallel(
             if conn: conn.close()
         except Exception:
             pass
+
+
+
+
+# -----------------------------------------------------------------------------
+# Full-course skill extraction from ALL relevant Course text fields
+# -----------------------------------------------------------------------------
+ALL_COURSE_SKILL_FIELDS = [
+    ("lesson_name", "lesson_name"),
+    ("degree_titles", "degree_titles"),
+    ("description", "description"),
+    ("objectives", "objectives"),
+    ("learning_outcomes", "learning_outcomes"),
+    ("course_content", "course_content"),
+    ("assessment", "assessment"),
+    ("exam", "exam"),
+    ("prerequisites", "prerequisites"),
+    ("general_competences", "general_competences"),
+    ("educational_material", "educational_material"),
+    ("attendance_type", "attendance_type"),
+    ("language", "language"),
+    ("hours", "hours"),
+    ("semester_label", "semester_label"),
+    ("ects_list", "ects_list"),
+    ("mand_opt_list", "mand_opt_list"),
+    ("msc_bsc_list", "msc_bsc_list"),
+    ("fee_list", "fee_list"),
+    ("professors", "professors"),
+    ("extras", "extras"),
+]
+
+
+def _normalize_skill_source_text(value: Any) -> str:
+    """Convert DB text/JSON values into extractor-safe plain text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return ""
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return raw
+    else:
+        parsed = value
+
+    out: List[str] = []
+
+    def walk(x):
+        if x is None:
+            return
+        if isinstance(x, str):
+            s = x.strip()
+            if s:
+                out.append(s)
+        elif isinstance(x, (int, float)):
+            out.append(str(x))
+        elif isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, (list, tuple, set)):
+            for item in x:
+                walk(item)
+        else:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+
+    walk(parsed)
+    return "\n".join(dict.fromkeys(out))
+
+
+def _extract_urls_for_course_all_fields(course: dict) -> tuple:
+    """
+    Extract skill URLs from all relevant Course fields.
+    Returns (course_id, title, url_to_categories).
+    """
+    cid = course["course_id"]
+    title = course.get("lesson_name") or f"course_{cid}"
+    url_to_categories: Dict[str, Set[str]] = defaultdict(set)
+
+    base = os.getenv("API_SKILL_EXTRACTOR_BASE_URL")
+    if not base:
+        logger.error("API_SKILL_EXTRACTOR_BASE_URL is missing")
+        return cid, title, url_to_categories
+
+    extractor_url = base.rstrip("/") + "/extract-skills"
+
+    for field, category in ALL_COURSE_SKILL_FIELDS:
+        text_value = _normalize_skill_source_text(course.get(field))
+        if not text_value:
+            continue
+
+        try:
+            resp = _http_session.post(
+                extractor_url,
+                headers={"Content-Type": "application/json", "accept": "application/json"},
+                json=[text_value],
+                verify=False,
+                timeout=60,
+            )
+
+            if not resp.ok:
+                logger.error(
+                    "Skill extractor failed for course_id=%s field=%s: %s %s",
+                    cid,
+                    field,
+                    resp.status_code,
+                    resp.text[:500],
+                )
+                continue
+
+            data = resp.json()
+            urls: Set[str] = set()
+
+            if isinstance(data, list):
+                for group in data:
+                    if isinstance(group, list):
+                        urls.update(su for su in group if isinstance(su, str))
+                    elif isinstance(group, str):
+                        urls.add(group)
+
+            elif isinstance(data, dict):
+                for it in data.get("items", []):
+                    ids = it.get("id") or it.get("ids") or []
+                    if isinstance(ids, str):
+                        urls.add(ids)
+                    elif isinstance(ids, list):
+                        urls.update(su for su in ids if isinstance(su, str))
+
+            for skill_url in urls:
+                url_to_categories[skill_url].add(category)
+
+            logger.info(
+                "course_id=%s field=%s extracted_urls=%d",
+                cid,
+                field,
+                len(urls),
+            )
+
+        except Exception:
+            logger.exception("Skill extraction failed for course_id=%s field=%s", cid, field)
+
+    return cid, title, url_to_categories
+
+
+def _extract_course_skills_all_fields_task(
+    task_id: str,
+    university_name: Optional[str] = None,
+    lesson_name: Optional[str] = None,
+    match: Literal["exact", "like"] = "like",
+    workers: int = 8,
+    min_skill_level: Optional[int] = None,
+    max_skill_level: Optional[int] = None,
+):
+    task = TASKS.get(task_id, {})
+
+    def set_status(**kw):
+        task.update(kw)
+        TASKS[task_id] = task
+
+    set_status(
+        status="running",
+        started_at=time.time(),
+        processed=0,
+        total=0,
+        phase="loading_courses",
+        university_filter=university_name,
+        lesson_filter=lesson_name,
+        match=match,
+    )
+
+    if not is_database_connected(DB_CONFIG):
+        set_status(status="failed", finished_at=time.time(), error="Database connection failed.")
+        return
+
+    token = get_tracker_token()
+    if not token:
+        set_status(status="failed", finished_at=time.time(), error="Tracker token missing")
+        return
+
+    def _build_pred(col: str, mode: str) -> str:
+        return f"LOWER({col}) = LOWER(%s)" if mode == "exact" else f"LOWER({col}) LIKE LOWER(%s)"
+
+    def _param(value: str, mode: str) -> str:
+        return value if mode == "exact" else f"%{value}%"
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+
+        where = []
+        params: List[Any] = []
+
+        if university_name:
+            where.append(_build_pred("u.university_name", match))
+            params.append(_param(university_name, match))
+
+        if lesson_name:
+            where.append(_build_pred("c.lesson_name", match))
+            params.append(_param(lesson_name, match))
+
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+        cur.execute(
+            f"""
+            SELECT
+                c.course_id,
+                c.university_id,
+                u.university_name,
+                c.lesson_name,
+                c.degree_titles,
+                c.description,
+                c.objectives,
+                c.learning_outcomes,
+                c.course_content,
+                c.assessment,
+                c.exam,
+                c.prerequisites,
+                c.general_competences,
+                c.educational_material,
+                c.attendance_type,
+                c.language,
+                c.hours,
+                c.semester_label,
+                c.ects_list,
+                c.mand_opt_list,
+                c.msc_bsc_list,
+                c.fee_list,
+                c.professors,
+                c.extras
+            FROM Course c
+            JOIN University u ON u.university_id = c.university_id
+            {where_sql}
+            ORDER BY u.university_name, c.lesson_name
+            """,
+            tuple(params),
+        )
+        courses = cur.fetchall() or []
+        total = len(courses)
+        set_status(total=total)
+
+        if total == 0:
+            set_status(
+                status="succeeded",
+                finished_at=time.time(),
+                result={"message": "No courses matched the filters.", "updated_courses": 0},
+            )
+            return
+
+        max_workers = max(1, min(int(workers or 8), 32))
+        extracted_maps: Dict[int, Dict[str, Set[str]]] = {}
+        titles: Dict[int, str] = {}
+        processed = 0
+        total_skill_urls = 0
+
+        set_status(phase="extracting_skill_urls")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(_extract_urls_for_course_all_fields, course): course["course_id"]
+                for course in courses
+            }
+
+            for fut in as_completed(futures):
+                cid = futures[fut]
+                try:
+                    course_id, title, url_to_categories = fut.result()
+                    titles[course_id] = title
+                    extracted_maps[course_id] = url_to_categories
+                    total_skill_urls += len(url_to_categories)
+                except Exception as e:
+                    logger.exception("Course extraction failed for course_id=%s: %s", cid, e)
+                    titles[cid] = f"course_{cid}"
+                    extracted_maps[cid] = {}
+
+                processed += 1
+                if processed % 10 == 0 or processed == total:
+                    set_status(
+                        processed=processed,
+                        phase="extracting_skill_urls",
+                        extracted_unique_skill_urls=total_skill_urls,
+                    )
+
+        all_urls: Set[str] = set()
+        for url_map in extracted_maps.values():
+            all_urls.update(url_map.keys())
+
+        set_status(phase="resolving_skill_names", unique_skill_urls=len(all_urls))
+        url_meta = _resolve_urls_to_names(all_urls, token)
+
+        if all_urls and not url_meta:
+            set_status(
+                status="failed",
+                finished_at=time.time(),
+                error="Skill URLs were extracted, but Tracker returned no skill metadata.",
+                unique_skill_urls=len(all_urls),
+            )
+            return
+
+        set_status(phase="upserting_course_skills")
+
+        results: Dict[str, List[str]] = {}
+        processed_db = 0
+        updated_courses = 0
+        total_inserted_names = 0
+        db_workers = max(1, min(int(os.getenv("SKILL_DB_WORKERS", "6")), 32))
+
+        with ThreadPoolExecutor(max_workers=db_workers) as dbex:
+            futures = {
+                dbex.submit(
+                    _db_write_course_skills,
+                    cid,
+                    extracted_maps.get(cid, {}),
+                    url_meta,
+                    min_skill_level,
+                    max_skill_level,
+                ): cid
+                for cid in extracted_maps
+            }
+
+            for fut in as_completed(futures):
+                cid = futures[fut]
+                title = titles.get(cid, f"course_{cid}")
+                try:
+                    names = fut.result() or []
+                except Exception as e:
+                    logger.exception("DB skill upsert failed for course_id=%s: %s", cid, e)
+                    names = []
+
+                if names:
+                    updated_courses += 1
+                    total_inserted_names += len(names)
+
+                results[title] = names
+                processed_db += 1
+
+                if processed_db % 10 == 0 or processed_db == total:
+                    set_status(
+                        processed=processed_db,
+                        phase="upserting_course_skills",
+                        updated_courses=updated_courses,
+                        linked_skill_names=total_inserted_names,
+                    )
+
+        set_status(
+            status="succeeded",
+            finished_at=time.time(),
+            result={
+                "processed_courses": total,
+                "updated_courses": updated_courses,
+                "unique_skill_urls": len(all_urls),
+                "resolved_skill_urls": len(url_meta),
+                "linked_skill_names": total_inserted_names,
+                "categories_used": [cat for _, cat in ALL_COURSE_SKILL_FIELDS],
+                "skills_by_course": results,
+            },
+        )
+
+    except Exception as e:
+        set_status(status="failed", finished_at=time.time(), error=str(e))
+        logger.exception("[%s] Full-field skill extraction task crashed: %s", task_id, e)
+    finally:
+        try:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+@app.post(
+    "/extract_course_skills_all_fields",
+    tags=["Skills"],
+    status_code=202,
+    summary="Extract skills from all Course text/JSON fields and update Skill/CourseSkill",
+)
+def extract_course_skills_all_fields(
+    background_tasks: BackgroundTasks,
+    university_name: Optional[str] = Query(None, description="Optional university filter"),
+    lesson_name: Optional[str] = Query(None, description="Optional course filter"),
+    match: Literal["exact", "like"] = Query("like"),
+    workers: int = Query(8, ge=1, le=32),
+    min_skill_level: Optional[int] = Query(None),
+    max_skill_level: Optional[int] = Query(None),
+):
+    """
+    Runs skill extraction for all matching courses.
+
+    It categorizes each extracted skill by the Course field it came from
+    (description, objectives, learning_outcomes, course_content, assessment,
+    prerequisites, degree_titles, etc.) and writes those categories into
+    CourseSkill.categories.
+    """
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    task_id = str(uuid4())
+    TASKS[task_id] = {
+        "status": "queued",
+        "queued_at": time.time(),
+        "type": "extract_course_skills_all_fields",
+        "university_filter": university_name,
+        "lesson_filter": lesson_name,
+        "match": match,
+        "workers": workers,
+        "min_skill_level": min_skill_level,
+        "max_skill_level": max_skill_level,
+    }
+
+    background_tasks.add_task(
+        _extract_course_skills_all_fields_task,
+        task_id,
+        university_name,
+        lesson_name,
+        match,
+        workers,
+        min_skill_level,
+        max_skill_level,
+    )
+
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress and results.",
+        "updates": ["Skill", "CourseSkill"],
+        "categories_source": "Course fields",
+    }
 
 
 @app.post("/calculate_skillnames", tags=["Skills"], summary="Extract and upsert skills (background task)",
@@ -1700,6 +2580,9 @@ def _calc_skillnames_task(
             return
 
         token = get_tracker_token()
+        if not token:
+            set_status(status="failed", finished_at=time.time(), error="Tracker token missing")
+            return
 
         extracted_maps = {}
         titles = {}
@@ -2878,6 +3761,25 @@ def get_skills_per_location_db():
         cursor.close()
         conn.close()
 
+def _append_continuation_to_course(course: Dict[str, Any], text: str):
+    text = _clean_pdf_text(_ensure_text(text)).strip()
+    if not text:
+        return course
+
+    target_field = "course_content"
+
+    if course.get(target_field):
+        course[target_field] = f"{course[target_field]}\n\n{text}"
+    elif course.get("description"):
+        course["description"] = f"{course['description']}\n\n{text}"
+    else:
+        course[target_field] = text
+
+    course.setdefault("extras", {})
+    course["extras"]["has_continuation_pages"] = True
+
+    return course
+
 
 @app.get("/trend/location", response_model=List[CountryTrend], tags=["Trend"],
          summary="University Join Trend per Country from DB")
@@ -3651,31 +4553,140 @@ def _guess_course_code_from_block(block: str) -> Optional[str]:
     m = re.search(r"\b([A-Z]{2,10}\d{3,6}|\d{5,6})\b", block or "")
     return m.group(1) if m else None
 
+
+def _looks_like_course_block(block: str) -> bool:
+    """Cheap validator for a curriculum/course block."""
+    b = _clean_pdf_text(_ensure_text(block))[:2500]
+    if len(b.strip()) < 120:
+        return False
+
+    score = 0
+    patterns = [
+        r"\b(?:course|unit|module)\s+(?:title|name)\s*:",
+        r"\b(?:course|unit|module)\s+(?:code|number|id)\s*:",
+        r"\b[A-Z]{1,12}[A-Z_\-]*\d{1,6}[A-Z]?\b",
+        r"\bECTS\b|\bcredits?\b|credit\s+rating",
+        r"\bdescription\b|\boverview\b|\baims?\b|\bobjectives?\b",
+        r"learning\s+outcomes?",
+        r"\bassessment\b|\bexam\b",
+        r"\bsemester\b|teaching\s+period|\bterm\b",
+    ]
+    for pat in patterns:
+        if re.search(pat, b, re.I):
+            score += 1
+    return score >= 3
+
+
+def _extract_title_from_start_match(text: str, pos: int) -> str:
+    snippet = text[pos:pos + 500]
+    lines = [re.sub(r"\s+", " ", l).strip(" •●▪*-\t") for l in snippet.splitlines() if l.strip()]
+
+    m = re.search(r"(?:course|unit|module)\s+title\s*:\s*([^\n\r]{3,180})", snippet, re.I)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    m = re.search(r"^\s*([A-Z][A-Za-z0-9&,.:'’()/+ \-–—]{3,180}?)\s*ECTS\s+credits\s*:", snippet, re.I | re.M)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    for i, line in enumerate(lines[:5]):
+        if re.search(r"^(?:unit|course|module)\s+(?:code|number|id)\b", line, re.I):
+            if i > 0:
+                return lines[i - 1]
+
+    m = re.search(r"^\s*(?:[A-Z]{1,12}[A-Z_\-]*\d{1,6}[A-Z]?|\d{4,8})\s+([A-Z][^\n]{3,180})", snippet, re.M)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    return lines[0] if lines else ""
+
+
 def split_course_blocks(text: str) -> List[str]:
     """
-    Splits curriculum text into probable course/module blocks.
-    Looks for course codes like 052715, COMP10040, CS1234, etc.
-    """
-    text = _clean_pdf_text(text or "")
+    Universal curriculum splitter.
 
-    pattern = re.compile(
-        r"(?=\n?(?:[A-Z]{2,10}\d{3,6}|\d{5,6})\b)",
-        re.MULTILINE
+    It detects common course starts without relying on one university format:
+    - Course title: X / o Course title: X
+    - X ECTS credits:5 Course code:Y
+    - X then Unit code Y / Course code Y / Module code Y
+    - CODE Title
+    - X: 2025-2026
+    """
+    text = _clean_pdf_text(_ensure_text(text))
+    if not text.strip():
+        return []
+
+    course_start_re = re.compile(
+        r"""
+        (?imx)
+        (?=
+            ^\s*(?:[•●▪\-\*]\s*)?o?\s*(?:course|unit|module)\s+title\s*:\s*[^\n\r]{3,180}
+            |
+            ^\s*[A-Z][A-Za-z0-9&,.:'’()/+ \-–—]{3,180}?\s*ECTS\s+credits\s*:\s*\d+(?:\.\d+)?\s*(?:course|unit|module)\s+code\s*:
+            |
+            ^\s*[A-Z][A-Za-z0-9&,.:'’()/+ \-–—]{3,180}\s*\n+\s*(?:unit|course|module)\s+(?:code|number|id)\s*[:\-]?\s*[A-Z]{1,12}[A-Z_\-]*\d{1,6}[A-Z]?
+            |
+            ^\s*(?:[A-Z]{1,12}[A-Z_\-]*\d{1,6}[A-Z]?|\d{4,8})\s+[A-Z][A-Za-z0-9&,.:'’()/+ \-–—]{3,180}
+            |
+            ^\s*[A-Z][A-Za-z0-9&,.:'’()/+ \-–—]{3,180}?\s*[:\-–—]\s*20\d{2}\s*[-–—/]\s*20\d{2}
+            |
+            ^\s*
+            (?:
+                [A-Z][A-Z0-9&,\-–—:'’()./+ ]{8,180}
+                |
+                [A-Z][A-Za-z0-9&,\-–—:'’()./+ ]{8,180}
+            )
+            \s*\n+
+            (?:Aims|Overview|Description|Learning outcomes|Course learning outcomes|Objectives|Assessment)\b
+        )
+        """,
+        re.MULTILINE | re.VERBOSE | re.IGNORECASE,
     )
 
-    parts = pattern.split(text)
-    blocks = []
+    bad_titles = {
+        "overview", "aims", "assessment", "syllabus", "course unit fact file",
+        "pre/co-requisites", "pre/co requisites", "prerequisites", "reading list",
+        "references", "bibliography", "learning outcomes", "course structure",
+        "details", "description", "objectives", "note", "semester 1", "semester 2",
+        "semester 3", "semester 4", "semester 5", "semester 6"
+    }
 
-    for part in parts:
-        part = part.strip()
-        if len(part) < 150:
+    starts = []
+    seen = set()
+    for m in course_start_re.finditer(text):
+        pos = m.start()
+        if pos in seen:
+            continue
+        seen.add(pos)
+
+        title = _extract_title_from_start_match(text, pos)
+        title_low = re.sub(r"\s+", " ", title).strip().lower()
+        if not title_low or title_low in bad_titles:
+            continue
+        if len(title_low) < 3 or len(title_low) > 220:
             continue
 
-        if re.search(r"(ECTS|Credits|Semester|Assessment|Learning outcomes|Aims|Prerequisites|Module|Course)", part, re.I):
-            blocks.append(part[:8000])
+        window = text[pos:pos + 2500]
+        if not _looks_like_course_block(window):
+            strong = re.search(r"(?:course|unit|module)\s+title\s*:|ECTS\s+credits\s*:|(?:unit|course|module)\s+code\s*:", window, re.I)
+            if not strong:
+                continue
+
+        starts.append(pos)
+
+    starts = sorted(set(starts))
+
+    blocks = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        block = text[start:end].strip()
+        if len(block) < 250:
+            continue
+        if not _looks_like_course_block(block):
+            continue
+        blocks.append(block)
 
     return blocks
-
 
 def _labels_to_structured_courses(
         labels: List[Dict[str, Any]],
@@ -3812,7 +4823,8 @@ def extract_one_course_with_llm(
         university_name: str,
         source_file: str,
         website: Optional[str] = None,
-        model: str = "llama3.1"
+        model: str = "llama3.1",
+        allow_missing_lesson_name: bool = False
 ) -> Optional[Dict[str, Any]]:
 
     ollama_url = (
@@ -3828,6 +4840,7 @@ You extract exactly ONE university course/module from the text below.
 A course is only valid if it has a title. You MUST identify the title.
 If the course code is present, the title is usually the meaningful line after the code.
 Never return null for lesson_name unless the block is definitely not a course.
+Also, in case a category of text is titled differently, try to fit it based off meaning to a different category (for example, Aims could be Objectives)
 
 Return ONLY valid JSON with exactly this shape:
 {{
@@ -3896,8 +4909,26 @@ TEXT:
         or course.get("Course Name")
         or course.get("Module Title")
         or course.get("Title")
-        or _guess_lesson_name_from_block(block)
     )
+
+    if not allow_missing_lesson_name:
+        name = name or _guess_lesson_name_from_block(block)
+
+    name = str(name or "").strip()
+
+    if not name:
+        if allow_missing_lesson_name:
+            course["lesson_name"] = None
+            course["university_name"] = university_name
+            course["source_file"] = source_file
+            course["website"] = course.get("website") or website
+            course["extras"] = course.get("extras") or {}
+            return course
+
+        logger.warning("Skipping block because no lesson name could be inferred. Block sample:\n%s", block[:1000])
+        return None
+
+    course["lesson_name"] = name[:255]
 
     name = str(name or "").strip()
 
@@ -3975,7 +5006,283 @@ def _sanitize_llm_course(course: Dict[str, Any]) -> Dict[str, Any]:
 
     return course
 
+def _force_fixed_chunks(
+        text: str,
+        chunk_size: int = 2000,
+        overlap: int = 250,
+        limit: int = 40000
+) -> List[str]:
+    text = _clean_pdf_text(_ensure_text(text))[:limit].strip()
 
+    if not text:
+        return []
+
+    chunk_size = max(200, int(chunk_size or 2000))
+    overlap = max(0, min(int(overlap or 0), chunk_size - 1))
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunk = text[start:end].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= len(text):
+            break
+
+        start = end - overlap
+
+    return chunks
+
+def _force_fixed_chunks(text: str, chunk_size: int = 2000, overlap: int = 250, limit: int = 40000) -> List[str]:
+    text = _clean_pdf_text(_ensure_text(text))[:limit].strip()
+
+    chunk_size = max(200, int(chunk_size or 2000))
+    overlap = max(0, min(int(overlap or 0), chunk_size - 1))
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = end - overlap
+
+    assert all(len(c) <= chunk_size for c in chunks), "force_chunk failed"
+
+    return chunks
+
+def detect_course_starts_with_ollama(
+        pages: List[str],
+        model: str,
+        batch_size: int = 12,
+        overlap_pages: int = 1
+) -> List[Dict[str, Any]]:
+    """Detect course starts using regex first, then Ollama as fallback per small page batch."""
+
+    def _regex_starts_from_preview(previews: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        heading_re = re.compile(
+            r"""
+            (?mx)
+            ^\s*
+            (
+                (?:[A-Z]{2,10}\d{3,6}|\d{5,6})\s+[^
+]{4,160}
+                |
+                (?:Module|Course|Course\s+Unit|Unit|Subject|Paper)\s*[:\-–—]?\s+[^
+]{4,160}
+                |
+                [A-Z][A-Za-z0-9&,+/().'’:\-–— ]{4,160}(?:\s*[:\-–—|]\s*20\d{2}\s*[-–—/]\s*20\d{2})?
+                |
+                ^\s*(?:o\s*)?Course\s+title\s*:\s*
+                [^\n]{3,180}
+                |
+                ^\s*
+                [A-Z][A-Za-z0-9&,\-–—:'’()./+ ]{3,180}
+                \s*
+                ECTS\s+credits\s*:\s*\d+
+                \s*
+                Course\s+code\s*:
+                |
+                ^\s*
+                [A-Z][A-Za-z0-9&,\-–—:'’()./+ ]{3,180}
+                \s*\n+
+                (?:Unit|Course|Module)\s+(?:code|number|id)\s*[:\-]?
+            )
+            \s*$
+            """,
+            re.MULTILINE | re.VERBOSE,
+        )
+
+        negative = {
+            "home", "contents", "table of contents", "reading list", "references",
+            "bibliography", "assessment", "overview", "syllabus", "learning outcomes",
+            "lecture notes", "further reading", "recommended reading", "student support",
+            "student handbook", "contact details", "timetable", "examinations",
+            "coursework", "appendix", "introduction", "department", "school",
+        }
+        positive_hints = [
+            "ects", "credits", "lecturer", "instructor", "module leader", "teacher",
+            "overview", "learning outcomes", "prerequisites", "assessment", "syllabus",
+            "term", "semester", "course code", "hours", "aims", "objectives",
+            "degree", "level", "language", "exam", "coursework",
+        ]
+
+        found = []
+        for p in previews:
+            page_no = int(p["page"])
+            page_text = p["text"]
+            for m in heading_re.finditer(page_text):
+                title = re.sub(r"\s+", " ", m.group(1)).strip(" -–—:	")
+                low = title.lower()
+                if len(title) < 5 or len(title) > 170:
+                    continue
+                if low in negative:
+                    continue
+                if re.fullmatch(r"\d+", title):
+                    continue
+                if re.search(r"^(figure|table|chapter|section)\s+\d+", low):
+                    continue
+                if re.search(r"(pp\.|doi|isbn|journal|proceedings)", low):
+                    continue
+
+                context = page_text[m.end(): min(len(page_text), m.end() + 1600)].lower()
+                score = 0
+                if re.search(r"20\d{2}\s*[-–—/]\s*20\d{2}", title):
+                    score += 3
+                if re.search(r"^(?:[A-Z]{2,10}\d{3,6}|\d{5,6})", title):
+                    score += 3
+                if re.match(r"^(Module|Course|Course\s+Unit|Unit|Subject|Paper)", title, re.I):
+                    score += 2
+                score += sum(1 for h in positive_hints if h in context)
+
+                if score < 2:
+                    continue
+
+                found.append({
+                    "course_title": re.sub(r"\s*[:\-–—|]\s*20\d{2}\s*[-–—/]\s*20\d{2}\s*$", "", title).strip(),
+                    "start_page": page_no,
+                    "evidence": page_text[m.start(): min(len(page_text), m.end() + 160)][:240],
+                })
+        return found
+
+    all_starts: List[Dict[str, Any]] = []
+    pages = pages or []
+    step = max(1, batch_size - overlap_pages)
+
+    for batch_start in range(0, len(pages), step):
+        batch_pages = pages[batch_start:batch_start + batch_size]
+        previews = []
+
+        for offset, page_text in enumerate(batch_pages):
+            page_no = batch_start + offset + 1
+            text = _clean_pdf_text(_ensure_text(page_text))
+            if text.strip():
+                previews.append({"page": page_no, "text": text[:3500]})
+
+        if not previews:
+            continue
+
+        regex_starts = _regex_starts_from_preview(previews)
+        if regex_starts:
+            logger.info(
+                "Regex boundary batch pages %s-%s detected %d starts",
+                previews[0]["page"], previews[-1]["page"], len(regex_starts)
+            )
+            all_starts.extend(regex_starts)
+            continue
+
+        prompt = f"""
+Find REAL university course/module start headings in these PDF pages.
+
+Return ONLY valid JSON array. No markdown, no prose.
+
+Format:
+[
+  {{
+    "course_title": "Advanced Security",
+    "start_page": 12,
+    "evidence": "Advanced Security: 2025-2026"
+  }}
+]
+
+A course/module heading may look like:
+- Advanced Security: 2025-2026
+- Algorithms and Data Structures
+- COMP3021 Machine Learning
+- Module: Distributed Systems
+- Artificial Intelligence | Hilary Term
+- Computational Biology
+- MSc Thesis Project
+- Research Methods in AI
+- Data Mining and Knowledge Discovery
+- Course Unit — Computer Vision
+- Paper B: Machine Learning
+- Unit 4 - Database Systems
+
+A real course/module usually has nearby words like:
+ECTS, Credits, Lecturer, Instructor, Module leader, Learning outcomes,
+Assessment, Overview, Syllabus, Semester, Term, Prerequisites, Coursework,
+Hours, Aims, Objectives, Degree, Level, Language.
+
+Do NOT return reading-list papers, bibliography entries, references, chapters,
+table-of-contents items, page headers/footers, navigation text, or generic section
+headings such as Assessment, Overview, Introduction, Syllabus.
+
+If a page continues the previous course, do not create a new item.
+Use the real page number from the provided page field.
+
+Pages:
+{json.dumps(previews, ensure_ascii=False)}
+"""
+        raw = _ollama_generate(prompt, model=model, temperature=0.0)
+        starts = _extract_json_array(raw)
+
+        if not starts:
+            logger.warning(
+                "LLM returned no starts for pages %s-%s. Raw response sample: %s",
+                previews[0]["page"], previews[-1]["page"], raw[:1000]
+            )
+
+        logger.info(
+            "LLM boundary batch pages %s-%s detected %d starts",
+            previews[0]["page"], previews[-1]["page"], len(starts)
+        )
+        all_starts.extend(starts)
+
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    for s in all_starts:
+        title = str(s.get("course_title") or "").strip()
+        try:
+            page = int(s.get("start_page"))
+        except Exception:
+            continue
+
+        if not title or page < 1 or page > len(pages):
+            continue
+
+        key = (page, re.sub(r"\W+", " ", title.lower()).strip())
+        deduped[key] = {"course_title": title, "start_page": page, "evidence": s.get("evidence")}
+
+    return sorted(deduped.values(), key=lambda x: (int(x["start_page"]), x["course_title"].lower()))
+
+
+def build_course_blocks_from_starts(
+        pages: List[str],
+        starts: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    starts = sorted(
+        [s for s in starts if s.get("course_title") and s.get("start_page")],
+        key=lambda x: int(x["start_page"])
+    )
+
+    blocks = []
+
+    for i, start in enumerate(starts):
+        start_page = int(start["start_page"])
+        end_page = (
+            int(starts[i + 1]["start_page"]) - 1
+            if i + 1 < len(starts)
+            else len(pages)
+        )
+
+        text = "\n\n".join(pages[start_page - 1:end_page])
+
+        blocks.append({
+            "lesson_name_hint": start["course_title"],
+            "start_page": start_page,
+            "end_page": end_page,
+            "text": text
+        })
+
+    return blocks
     
 @app.post(
     "/pdf/upload_and_process",
@@ -3993,11 +5300,22 @@ async def upload_pdf_and_process(
         overlap: int = Form(250),
         max_chars: int = Form(80000),
         background_tasks: BackgroundTasks = None,
-        split_mode: Literal["full_text", "per_page"] = Form(
+        split_mode: Literal[
             "full_text",
-            description="Course splitting mode: full_text = split whole PDF, per_page = split courses page by page"
-        ),
-):
+            "per_page",
+            "force_chunk",
+            "llm_course_boundaries"
+        ] = Form(
+            "full_text",
+            description=(
+                "Course splitting mode: "
+                "full_text = split whole PDF into detected course blocks, "
+                "per_page = split courses page by page, "
+                "force_chunk = ignore course splitting and process fixed-size chunks, "
+                "llm_course_boundaries = use Ollama to detect course start pages"
+            ),
+        )
+        ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -4008,19 +5326,15 @@ async def upload_pdf_and_process(
 
     with open(pdf_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
+
+    pages = extract_text_from_pdf(pdf_path)
+    if not isinstance(pages, list):
+        pages = []
+    if not pages and full_text.strip():
+        pages = [full_text]
         
-
-    try:
-        if split_mode == "per_page":
-            raw_pages = extract_text_from_pdf(pdf_path)
-            pages = [_ensure_text(p) for p in raw_pages] if isinstance(raw_pages, list) else [_ensure_text(raw_pages)]
-            full_text = "\n".join(pages)
-        else:
-            pages = []
-            full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {e}")
 
     cleaned_text = _clean_pdf_text(full_text)
 
@@ -4078,15 +5392,83 @@ async def upload_pdf_and_process(
 
                 for block in split_course_blocks(cleaned_page):
                     blocks.append(f"[PAGE {page_no}]\n{block}")
+
+        elif split_mode == "per_page":
+            blocks = split_course_blocks(cleaned_text)
+
+        elif split_mode == "llm_course_boundaries":
+            if not pages:
+                logger.warning("No page list available for llm_course_boundaries; falling back to full_text splitter")
+                blocks = split_course_blocks(cleaned_text)
+            else:
+                starts = detect_course_starts_with_ollama(
+                    pages=pages,
+                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b")
+                )
+                logger.info("LLM/regex detected %d course starts", len(starts))
+
+                course_blocks = build_course_blocks_from_starts(pages, starts)
+
+                blocks = [
+                    f"[COURSE_HINT: {b['lesson_name_hint']}]\n"
+                    f"[PAGES: {b['start_page']}-{b['end_page']}]\n\n"
+                    f"{b['text']}"
+                    for b in course_blocks
+                ]
+
+                if not blocks:
+                    logger.warning("llm_course_boundaries produced 0 blocks; falling back to full_text splitter")
+                    blocks = split_course_blocks(cleaned_text)
+
+        elif split_mode == "force_chunk":
+            blocks = _force_fixed_chunks(
+                full_text,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                limit=max_chars
+            )
+
+            logger.info(
+                "FORCE_CHUNK sizes: %s",
+                [len(b) for b in blocks[:20]]
+            )
+
         else:
             blocks = split_course_blocks(cleaned_text)
 
-        logger.info("Detected %d possible course blocks", len(blocks))
+        # Hard fallback: never let full_text/per_page/llm modes silently return zero.
+        # If deterministic course splitting fails for a new university format, process
+        # fixed-size chunks so extraction still returns courses instead of an empty payload.
+        if not blocks and split_mode != "force_chunk":
+            logger.warning(
+                "%s produced 0 course blocks; falling back to fixed chunks chunk_size=%s overlap=%s",
+                split_mode,
+                chunk_size,
+                overlap,
+            )
+            blocks = _force_fixed_chunks(
+                cleaned_text,
+                chunk_size=chunk_size or 8000,
+                overlap=overlap or 800,
+                limit=max_chars,
+            )
+            logger.info("Fallback fixed chunks created %d blocks", len(blocks))
+
+        if split_mode == "force_chunk":
+            logger.info("Created %d forced fixed chunks", len(blocks))
+        elif split_mode == "llm_course_boundaries":
+            logger.info("Created %d LLM/regex course boundary blocks", len(blocks))
+        else:
+            logger.info("Detected %d possible course blocks", len(blocks))
 
         for i, block in enumerate(blocks):
-            logger.info("Extracting course block %d/%d chars=%d", i + 1, len(blocks), len(block))
-
-            course = None
+            logger.info(
+                "Extracting block %d/%d split_mode=%s chars=%d",
+                i + 1,
+                len(blocks),
+                split_mode,
+                len(block)
+            )
 
             try:
                 course = extract_one_course_with_llm(
@@ -4094,12 +5476,24 @@ async def upload_pdf_and_process(
                     university_name=final_university_name,
                     source_file=os.path.basename(pdf_path),
                     website=website,
-                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b")
+                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b"),
+                    allow_missing_lesson_name=True
                 )
 
-                if course:
-                    logger.info("Extracted course: %s", course.get("lesson_name"))
+                if course and course.get("lesson_name"):
                     structured_courses.append(course)
+
+                elif structured_courses:
+                    structured_courses[-1] = _append_continuation_to_course(
+                        structured_courses[-1],
+                        block
+                    )
+
+                else:
+                    logger.warning(
+                        "No lesson name in first forced chunk/block. Skipping sample:\n%s",
+                        block[:1000]
+                    )
 
             except Exception as e:
                 logger.exception("Failed block %d/%d: %s", i + 1, len(blocks), e)
@@ -4140,8 +5534,8 @@ async def upload_pdf_and_process(
             "chunk_size": chunk_size,
             "overlap": overlap,
             "split_mode": split_mode,
-            "pages_detected": len(pages),
-            "blocks_detected": len(blocks)
+            "pages_detected": len(pages) if 'pages' in locals() else 0,
+            "blocks_detected": len(blocks) if 'blocks' in locals() else 0
         },
         "labels_count": len(labels or []),
         "lesson_count": len(structured_courses),
@@ -4165,6 +5559,8 @@ async def upload_pdf_and_process(
             "university_name": final_university_name
         }
 
+        if background_tasks is None:
+            raise HTTPException(status_code=500, detail="BackgroundTasks is not available.")
         background_tasks.add_task(_save_payload_task, task_id, payload)
 
         payload["db_save"] = {
