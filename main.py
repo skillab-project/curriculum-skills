@@ -13,6 +13,79 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 from functools import partial
 from threading import Lock, Semaphore
 from cleaner import clean_file, iter_json_files
+import csv
+
+_ESCO_LABEL_CACHE: Optional[Dict[str, Dict[str, Optional[str]]]] = None
+
+
+
+
+def _load_esco_skill_labels() -> Dict[str, Dict[str, Optional[str]]]:
+    global _ESCO_LABEL_CACHE
+
+    if _ESCO_LABEL_CACHE is not None:
+        return _ESCO_LABEL_CACHE
+
+    csv_path = os.getenv("ESCO_SKILLS_CSV", "/app/data/skills_en.csv")
+
+    if not os.path.exists(csv_path):
+        raise RuntimeError(f"ESCO skills CSV not found: {csv_path}")
+
+    mapping: Dict[str, Dict[str, Optional[str]]] = {}
+
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            uri = (
+                row.get("conceptUri")
+                or row.get("concept_uri")
+                or row.get("uri")
+                or row.get("skillUri")
+            )
+
+            label = (
+                row.get("preferredLabel")
+                or row.get("preferred_label")
+                or row.get("label")
+            )
+
+            skill_type = (
+                row.get("skillType")
+                or row.get("skill_type")
+                or row.get("reuseLevel")
+            )
+
+            if uri and label:
+                mapping[uri.strip()] = {
+                    "label": label.strip(),
+                    "esco_id": uri.strip().rsplit("/", 1)[-1],
+                    "level": skill_type.strip() if skill_type else None,
+                }
+
+    _ESCO_LABEL_CACHE = mapping
+    print(f"[ESCO] Loaded {len(mapping)} ESCO skill labels from {csv_path}", flush=True)
+    return mapping
+
+
+def _resolve_urls_to_names_local_esco(all_urls: Set[str]) -> Dict[str, dict]:
+    labels = _load_esco_skill_labels()
+
+    out: Dict[str, dict] = {}
+
+    for url in all_urls:
+        meta = labels.get(url)
+
+        if meta:
+            out[url] = meta
+        else:
+            out[url] = {
+                "label": url,  # fallback only
+                "esco_id": url.rsplit("/", 1)[-1],
+                "level": None,
+            }
+
+    return out
 
 try:
     import orjson as _jsonlib
@@ -1340,6 +1413,234 @@ def health_check():
     return {"status": "running"}
 
 
+class RenameSkillsFromESCOResponse(BaseModel):
+    status: str
+    checked_skills: int
+    updated_skills: int
+    missing_in_csv: int
+    dry_run: bool
+    examples: List[Dict[str, Any]]
+
+class RenameSkillsFromESCOResponse(BaseModel):
+    status: str
+    checked_skills: int
+    updated_skills: int
+    missing_in_csv: int
+    dry_run: bool
+    examples: List[Dict[str, Any]]
+
+
+@app.post(
+    "/skills/rename_from_esco_csv",
+    response_model=RenameSkillsFromESCOResponse,
+    tags=["Skills"],
+    summary="Rename Skill.skill_name using local ESCO CSV and skill_url",
+)
+def rename_skills_from_esco_csv(
+    dry_run: bool = Query(
+        True,
+        description="Preview changes without updating database"
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Limit number of checked skills"
+    ),
+):
+    """
+    Updates Skill.skill_name from local ESCO CSV using skill_url.
+    Also stores alternative labels if your DB has alt_labels column.
+    """
+
+    print("[ESCO-RENAME] Loading local ESCO CSV...", flush=True)
+
+    esco_labels = _load_esco_skill_labels()
+
+    print(
+        f"[ESCO-RENAME] Loaded {len(esco_labels)} ESCO labels.",
+        flush=True
+    )
+
+    conn = None
+    cur = None
+
+    checked = 0
+    updated = 0
+    missing = 0
+
+    examples = []
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+
+        sql = """
+            SELECT
+                skill_id,
+                skill_url,
+                skill_name
+            FROM Skill
+            WHERE skill_url IS NOT NULL
+              AND skill_url != ''
+        """
+
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+
+        cur.execute(sql)
+
+        skills = cur.fetchall() or []
+
+        total = len(skills)
+
+        print(
+            f"[ESCO-RENAME] Found {total} Skill rows to check.",
+            flush=True
+        )
+
+        update_cur = conn.cursor()
+
+        for idx, row in enumerate(skills, start=1):
+            skill_id = row["skill_id"]
+            skill_url = (row.get("skill_url") or "").strip()
+            old_name = (row.get("skill_name") or "").strip()
+
+            checked += 1
+
+            if not skill_url:
+                continue
+
+            meta = esco_labels.get(skill_url)
+
+            if not meta:
+                missing += 1
+
+                print(
+                    f"[MISSING] {idx}/{total} | "
+                    f"skill_id={skill_id} | "
+                    f"url={skill_url}",
+                    flush=True
+                )
+
+                continue
+
+            new_name = (meta.get("label") or "").strip()
+
+            if not new_name:
+                missing += 1
+                continue
+
+            if old_name == new_name:
+                continue
+
+            examples.append({
+                "skill_id": skill_id,
+                "old": old_name,
+                "new": new_name,
+            })
+
+            print(
+                f"[UPDATE] {idx}/{total} | "
+                f"skill_id={skill_id} | "
+                f"{old_name} -> {new_name}",
+                flush=True
+            )
+
+            # Check if another row already has the target name + same URL
+            update_cur.execute("""
+                SELECT skill_id
+                FROM Skill
+                WHERE skill_url = %s
+                AND skill_name = %s
+                AND skill_id <> %s
+                LIMIT 1
+            """, (skill_url, new_name, skill_id))
+
+            duplicate = update_cur.fetchone()
+
+            if duplicate:
+                keep_skill_id = duplicate[0]
+                old_skill_id = skill_id
+
+                print(
+                    f"[MERGE] skill_id={old_skill_id} -> {keep_skill_id} | {new_name}",
+                    flush=True
+                )
+
+                if not dry_run:
+                    # Move course links from duplicate skill to existing skill
+                    update_cur.execute("""
+                        INSERT IGNORE INTO CourseSkill (course_id, skill_id, categories)
+                        SELECT course_id, %s, categories
+                        FROM CourseSkill
+                        WHERE skill_id = %s
+                    """, (keep_skill_id, old_skill_id))
+
+                    # Remove old links
+                    update_cur.execute("""
+                        DELETE FROM CourseSkill
+                        WHERE skill_id = %s
+                    """, (old_skill_id,))
+
+                    # Remove duplicate Skill row
+                    update_cur.execute("""
+                        DELETE FROM Skill
+                        WHERE skill_id = %s
+                    """, (old_skill_id,))
+
+                    updated += 1
+
+                continue
+
+            # No duplicate exists, safe rename
+            if not dry_run:
+                update_cur.execute("""
+                    UPDATE Skill
+                    SET skill_name = %s
+                    WHERE skill_id = %s
+                """, (new_name, skill_id))
+
+                updated += 1
+
+        if not dry_run:
+            conn.commit()
+
+        print(
+            f"[ESCO-RENAME] DONE | "
+            f"checked={checked} | "
+            f"updated={updated} | "
+            f"missing={missing} | "
+            f"dry_run={dry_run}",
+            flush=True
+        )
+
+        return {
+            "status": "completed",
+            "checked_skills": checked,
+            "updated_skills": updated,
+            "missing_in_csv": missing,
+            "dry_run": dry_run,
+            "examples": examples[:50],
+        }
+
+    except Exception as e:
+        print(f"[ESCO-RENAME-FAILED] {e}", flush=True)
+        logger.exception("ESCO rename failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        try:
+            if cur:
+                cur.close()
+        except Exception:
+            pass
+
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
 @app.post("/nlp/curriculnlp", tags=["CurricuNLP"], summary="Run CurricuNLP on raw text and return labels")
 def curriculnlp_labels(req: CurricuNLPTextRequest):
     text = (req.text or "").strip()
@@ -1994,6 +2295,29 @@ def _extract_urls_for_course_all_fields(course: dict) -> tuple:
         text_value = _normalize_skill_source_text(course.get(field))
         if not text_value:
             continue
+        
+
+        try:
+            detected_lang = _detect_lang(text_value)
+        except Exception:
+            detected_lang = "unknown"
+
+        if detected_lang != "en":
+            try:
+                print(
+                    f"[TRANSLATE] course_id={cid} field={field} lang={detected_lang} -> en",
+                    flush=True
+                )
+                text_value = _translate_hf(text_value, source_lang=detected_lang, target_lang="en")
+            except TypeError:
+                text_value = _translate_hf(text_value)
+            except Exception as e:
+                print(
+                    f"[TRANSLATE-WARN] course_id={cid} field={field} translation failed: {e}",
+                    flush=True
+                )
+
+        
 
         try:
             resp = _http_session.post(
@@ -3076,6 +3400,262 @@ def get_top_skills(
         cursor.close()
         conn.close()
 
+
+@app.post(
+    "/extract_course_skills_all_fields_direct",
+    tags=["Skills"],
+    summary="Directly extract skills from all Course fields using local ESCO extractor",
+)
+def extract_course_skills_all_fields_direct(
+    university_name: Optional[str] = Query(None),
+    lesson_name: Optional[str] = Query(None),
+    match: Literal["exact", "like"] = Query("like"),
+    workers: int = Query(8, ge=1, le=32),
+    min_skill_level: Optional[int] = Query(None),
+    max_skill_level: Optional[int] = Query(None),
+):
+    """
+    Blocking endpoint.
+    No background task.
+    No task_id.
+    Prints progress directly in CMD / Docker logs.
+    """
+
+    print("\n==============================")
+    print("STARTING DIRECT SKILL EXTRACTION")
+    print("==============================")
+    print(f"University filter: {university_name}")
+    print(f"Lesson filter: {lesson_name}")
+    print(f"Match mode: {match}")
+    print(f"Workers: {workers}")
+    print(f"Extractor base: {os.getenv('API_SKILL_EXTRACTOR_BASE_URL')}")
+    print("==============================\n")
+
+    print("[0/5] Checking database connection...", flush=True)
+
+    try:
+        test_conn = mysql.connector.connect(
+            **DB_CONFIG,
+            connection_timeout=5
+        )
+        test_conn.close()
+        print("[OK] Database connection works.", flush=True)
+    except Exception as e:
+        print(f"[FAILED] Database connection failed: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    def _build_pred(col: str, mode: str) -> str:
+        return f"LOWER({col}) = LOWER(%s)" if mode == "exact" else f"LOWER({col}) LIKE LOWER(%s)"
+
+    def _param(value: str, mode: str) -> str:
+        return value if mode == "exact" else f"%{value}%"
+
+    conn = None
+    cur = None
+
+    try:
+        print("[1/5] Connecting to database...")
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+
+        where = []
+        params: List[Any] = []
+
+        if university_name:
+            where.append(_build_pred("u.university_name", match))
+            params.append(_param(university_name, match))
+
+        if lesson_name:
+            where.append(_build_pred("c.lesson_name", match))
+            params.append(_param(lesson_name, match))
+
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+        print("[2/5] Loading courses from database...")
+
+        cur.execute(
+            f"""
+            SELECT
+                c.course_id,
+                c.university_id,
+                u.university_name,
+                c.lesson_name,
+                c.degree_titles,
+                c.description,
+                c.objectives,
+                c.learning_outcomes,
+                c.course_content,
+                c.assessment,
+                c.exam,
+                c.prerequisites,
+                c.general_competences,
+                c.educational_material,
+                c.attendance_type,
+                c.language,
+                c.hours,
+                c.semester_label,
+                c.ects_list,
+                c.mand_opt_list,
+                c.msc_bsc_list,
+                c.fee_list,
+                c.professors,
+                c.extras
+            FROM Course c
+            JOIN University u ON u.university_id = c.university_id
+            {where_sql}
+            ORDER BY u.university_name, c.lesson_name
+            """,
+            tuple(params),
+        )
+
+        courses = cur.fetchall() or []
+        total = len(courses)
+
+        print(f"[OK] Loaded {total} courses.")
+
+        if not courses:
+            return {
+                "status": "completed",
+                "message": "No courses found.",
+                "processed_courses": 0,
+            }
+
+        print("[3/5] Extracting ESCO skill URLs from course fields...")
+
+        extracted_maps: Dict[int, Dict[str, Set[str]]] = {}
+        titles: Dict[int, str] = {}
+        all_urls: Set[str] = set()
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(_extract_urls_for_course_all_fields, course): course
+                for course in courses
+            }
+
+            processed = 0
+
+            for fut in as_completed(futures):
+                cid, title, url_to_categories = fut.result()
+
+                titles[cid] = title
+                extracted_maps[cid] = url_to_categories
+
+                for url in url_to_categories.keys():
+                    all_urls.add(url)
+
+                processed += 1
+
+                print(
+                    f"[EXTRACT] {processed}/{total} | "
+                    f"course_id={cid} | {title} | "
+                    f"skills={len(url_to_categories)}"
+                )
+
+        print(f"[OK] Unique extracted ESCO skill URLs: {len(all_urls)}")
+
+        print("[4/5] Resolving ESCO URLs using local ESCO CSV...", flush=True)
+
+        url_meta = _resolve_urls_to_names_local_esco(all_urls)
+
+        missing = [
+            url for url, meta in url_meta.items()
+            if meta.get("label") == url
+        ]
+
+        print(
+            f"[OK] Resolved {len(url_meta) - len(missing)}/{len(all_urls)} "
+            f"ESCO skill names locally. Missing={len(missing)}",
+            flush=True
+        )
+
+        print(f"[OK] Prepared {len(url_meta)} local ESCO skills.", flush=True)
+
+        if all_urls and not url_meta:
+            raise HTTPException(
+                status_code=502,
+                detail="Skill URLs were extracted, but Tracker returned no metadata."
+            )
+
+        print("[5/5] Writing skills into Skill and CourseSkill tables...")
+
+        results: Dict[str, List[str]] = {}
+        updated_courses = 0
+        total_inserted_names = 0
+
+        db_workers = max(1, min(int(os.getenv("SKILL_DB_WORKERS", "6")), 32))
+
+        with ThreadPoolExecutor(max_workers=db_workers) as dbex:
+            futures = {
+                dbex.submit(
+                    _db_write_course_skills,
+                    cid,
+                    extracted_maps.get(cid, {}),
+                    url_meta,
+                    min_skill_level,
+                    max_skill_level,
+                ): cid
+                for cid in extracted_maps
+            }
+
+            processed_db = 0
+
+            for fut in as_completed(futures):
+                cid = futures[fut]
+                title = titles.get(cid, f"course_{cid}")
+
+                try:
+                    names = fut.result() or []
+                except Exception as e:
+                    print(f"[ERROR] DB upsert failed for course_id={cid}: {e}")
+                    logger.exception("DB skill upsert failed for course_id=%s", cid)
+                    names = []
+
+                if names:
+                    updated_courses += 1
+                    total_inserted_names += len(names)
+
+                results[title] = names
+                processed_db += 1
+
+                print(
+                    f"[DB] {processed_db}/{total} | "
+                    f"{title} | inserted/linked={len(names)}"
+                )
+
+        print("\n==============================")
+        print("DIRECT SKILL EXTRACTION FINISHED")
+        print("==============================")
+        print(f"Processed courses: {total}")
+        print(f"Updated courses: {updated_courses}")
+        print(f"Unique skill URLs: {len(all_urls)}")
+        print(f"Resolved skill URLs: {len(url_meta)}")
+        print(f"Linked skill names: {total_inserted_names}")
+        print("==============================\n")
+
+        return {
+            "status": "completed",
+            "processed_courses": total,
+            "updated_courses": updated_courses,
+            "unique_skill_urls": len(all_urls),
+            "resolved_skill_urls": len(url_meta),
+            "linked_skill_names": total_inserted_names,
+            "categories_used": [cat for _, cat in ALL_COURSE_SKILL_FIELDS],
+            "skills_by_course": results,
+        }
+
+    except Exception as e:
+        print(f"[FAILED] Direct skill extraction crashed: {e}")
+        logger.exception("Direct full-field skill extraction crashed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        try:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 @app.get("/get_top_skills_all", tags=["Queries"])
 def get_top_skills_all(

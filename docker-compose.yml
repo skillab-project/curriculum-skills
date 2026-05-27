@@ -24,10 +24,18 @@ services:
       timeout: 3s
       retries: 10
 
+  esco-skill-extractor:
+    image: konstantinospetrakis/esco-skill-extractor
+    container_name: esco-skill-extractor
+    ports:
+      - "8081:5000"
+
   curriculum-skills:
     depends_on:
       mysql-curriculum-skill:
         condition: service_healthy
+      esco-skill-extractor:
+        condition: service_started
     container_name: curriculum-skills
     build: .
     image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
@@ -37,6 +45,7 @@ services:
       - curriculum-curriculum:/app/curriculum
       - curriculum-crawler_json:/app/crawler_json
       - skill-gap-longterm:/app/longterm_storage
+      - ./data/esco:/app/data
     env_file:
       - .env
     environment:

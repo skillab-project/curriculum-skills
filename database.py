@@ -64,65 +64,100 @@ def _to_decimal(val):
     return None
     
     
-def upsert_skill_and_link_with_categories(_conn, course_id: int,
-                                          skill_url: Optional[str],
-                                          skill_name: str,
-                                          esco_id: Optional[str],
-                                          esco_level: Optional[str],
-                                          categories: List[str]):
-    """
-    Upsert Skill including esco_id + esco_level, then upsert CourseSkill with merged categories.
-    Prefer identifying a skill by URL; if not present, fall back to name.
-    """
+def upsert_skill_and_link_with_categories(
+    _conn,
+    course_id: int,
+    skill_url: Optional[str],
+    skill_name: str,
+    esco_id: Optional[str],
+    esco_level: Optional[str],
+    categories: List[str],
+):
     cur = _conn.cursor()
     try:
-        skill_id = None
-        if skill_url:
-            cur.execute("SELECT skill_id FROM Skill WHERE skill_url = %s LIMIT 1", (skill_url,))
-            row = cur.fetchone()
-            if row:
-                skill_id = row[0]
-                cur.execute("""
-                    UPDATE Skill
-                       SET skill_name = COALESCE(skill_name, %s),
-                           esco_id    = COALESCE(esco_id, %s),
-                           esco_level = COALESCE(esco_level, %s)
-                     WHERE skill_id = %s
-                """, (skill_name, esco_id, esco_level, skill_id))
+        skill_url = (skill_url or "").strip() or None
+        skill_name = (skill_name or "").strip() or None
+        esco_id = (esco_id or "").strip() or None
+        esco_level = (str(esco_level).strip() if esco_level is not None else None) or None
 
-        if skill_id is None:
-            cur.execute("SELECT skill_id FROM Skill WHERE skill_url IS NULL AND skill_name = %s LIMIT 1", (skill_name,))
-            row = cur.fetchone()
-            if row:
-                skill_id = row[0]
-                cur.execute("""
-                    UPDATE Skill
-                       SET skill_url  = COALESCE(skill_url, %s),
-                           esco_id    = COALESCE(esco_id, %s),
-                           esco_level = COALESCE(esco_level, %s)
-                     WHERE skill_id = %s
-                """, (skill_url, esco_id, esco_level, skill_id))
+        if not skill_name and skill_url:
+            skill_name = skill_url.rsplit("/", 1)[-1]
 
-        if skill_id is None:
+        cur.execute("""
+            INSERT INTO Skill (
+                skill_url,
+                skill_name,
+                esco_id,
+                esco_level
+            )
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                skill_name = COALESCE(VALUES(skill_name), skill_name),
+                esco_id = COALESCE(VALUES(esco_id), esco_id),
+                esco_level = COALESCE(VALUES(esco_level), esco_level)
+        """, (skill_url, skill_name, esco_id, esco_level))
+
+        cur.execute("""
+            SELECT skill_id
+            FROM Skill
+            WHERE skill_url = %s
+            LIMIT 1
+        """, (skill_url,))
+
+        row = cur.fetchone()
+
+        if not row and skill_name:
             cur.execute("""
-                INSERT INTO Skill (skill_name, skill_url, esco_id, esco_level)
-                VALUES (%s, %s, %s, %s)
-            """, (skill_name, skill_url, esco_id, esco_level))
-            skill_id = cur.lastrowid
+                SELECT skill_id
+                FROM Skill
+                WHERE skill_name = %s
+                LIMIT 1
+            """, (skill_name,))
+            row = cur.fetchone()
 
-        cur.execute("SELECT categories FROM CourseSkill WHERE course_id = %s AND skill_id = %s", (course_id, skill_id))
+        if not row:
+            raise RuntimeError(f"Could not resolve skill_id for skill_url={skill_url}, skill_name={skill_name}")
+
+        skill_id = row[0]
+
+        cur.execute("""
+            SELECT categories
+            FROM CourseSkill
+            WHERE course_id = %s AND skill_id = %s
+        """, (course_id, skill_id))
+
         ex = cur.fetchone()
+
         if ex:
             try:
-                merged = sorted(set((json.loads(ex[0] or "[]")) + (categories or [])))
+                old_categories = json.loads(ex[0] or "[]")
             except Exception:
-                merged = sorted(set(categories or []))
-            cur.execute("UPDATE CourseSkill SET categories = %s WHERE course_id = %s AND skill_id = %s",
-                        (json.dumps(merged), course_id, skill_id))
+                old_categories = []
+
+            merged = sorted(set(old_categories + (categories or [])))
+
+            cur.execute("""
+                UPDATE CourseSkill
+                SET categories = %s
+                WHERE course_id = %s AND skill_id = %s
+            """, (json.dumps(merged), course_id, skill_id))
+
         else:
-            cur.execute("INSERT INTO CourseSkill (course_id, skill_id, categories) VALUES (%s, %s, %s)",
-                        (course_id, skill_id, json.dumps(sorted(set(categories or [])))))
+            cur.execute("""
+                INSERT IGNORE INTO CourseSkill (
+                    course_id,
+                    skill_id,
+                    categories
+                )
+                VALUES (%s, %s, %s)
+            """, (
+                course_id,
+                skill_id,
+                json.dumps(sorted(set(categories or [])))
+            ))
+
         _conn.commit()
+
     finally:
         cur.close()
 
