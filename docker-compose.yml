@@ -27,8 +27,8 @@ services:
   esco-skill-extractor:
     image: konstantinospetrakis/esco-skill-extractor
     container_name: esco-skill-extractor
-    ports:
-      - "8081:5000"
+    # ports:
+    #   - "8081:5000"
 
   curriculum-skills:
     depends_on:
