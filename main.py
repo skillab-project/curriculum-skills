@@ -201,6 +201,12 @@ CURRICUNLP_MAX_CHUNKS = int(os.getenv("CURRICUNLP_MAX_CHUNKS", "128"))
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 
+from recommendation_system.backend.routers.electives import router as electives_router
+from recommendation_system.backend.routers.filters import router as filters_router
+from recommendation_system.backend.routers.recommendations import router as recommendations_router
+
+
+
 _http_session = requests.Session()
 _http_adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=2)
 _http_session.mount("http://", _http_adapter)
@@ -499,6 +505,24 @@ app = FastAPI(
     version="0.1.3",
     description="API for skill extraction and course search (DB + domains JSON).",
     root_path="/curriculum-skills"
+)
+
+app.include_router(
+    electives_router,
+    prefix="/recommendation/electives",
+    tags=["Recommendation"]
+)
+
+app.include_router(
+    filters_router,
+    prefix="/recommendation/filters",
+    tags=["Recommendation"]
+)
+
+app.include_router(
+    recommendations_router,
+    prefix="/recommendation",
+    tags=["Recommendation"]
 )
 
 
