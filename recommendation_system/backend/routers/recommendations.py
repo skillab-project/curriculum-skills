@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
+from typing import Optional
 from typing import List, Dict, Any
 from urllib.parse import unquote
 import logging
@@ -355,6 +356,77 @@ def suggest_courses_for_university(univ_id: int, top_n: int = 10, db: Session = 
     result = recommender.suggest_courses(univ_id, top_n)
     return {"university_id": univ_id, "recommendations": result}
 
+@router.get("/recommend/courses/{degree_name}", tags=["Recommendation"])
+def recommend_courses_by_degree_name(
+    degree_name: str,
+    university_id: Optional[int] = Query(None),
+    top_n: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    recommender = CourseRecommenderV2(db)
+
+    all_profiles = []
+
+    for university in recommender.get_all_universities():
+        all_profiles.extend(
+            recommender.build_degree_profiles(university.university_id)
+        )
+
+    if university_id is not None:
+        target_profiles = recommender.build_degree_profiles(university_id)
+    else:
+        target_profiles = all_profiles
+
+    degree_query = degree_name.strip().lower()
+
+    matching_profiles = [
+        p for p in target_profiles
+        if degree_query in (p.get("degree_title") or "").strip().lower()
+    ]
+
+    if not matching_profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No degree found containing '{degree_name}'"
+        )
+
+    all_skills = set()
+    all_courses = set()
+    degree_types = []
+
+    for p in matching_profiles:
+        all_skills.update(p.get("skills", []) or [])
+        all_courses.update(p.get("courses", []) or [])
+        if p.get("degree_type"):
+            degree_types.append(p.get("degree_type"))
+
+    target_degree = {
+        "university_id": university_id or -1,
+        "program_id": -1,
+        "degree_title": degree_name,
+        "degree_type": degree_types[0] if degree_types else "Other",
+        "skills": sorted(all_skills),
+        "courses": sorted(all_courses),
+    }
+
+    similar_degrees = recommender.find_similar_degrees(
+        target_degree,
+        all_profiles,
+        top_n=10,
+    )
+
+    recommendations = recommender.suggest_courses_for_degree(
+        target_degree,
+        similar_degrees,
+        top_n=top_n,
+    )
+
+    return {
+        "degree_name": degree_name,
+        "university_id": university_id,
+        "target_degree": target_degree,
+        "recommended_courses": recommendations,
+    }
 
 @router.post("/recommend/personalized", summary="Recommend personalized courses based on user preferences.")
 def recommend_personalized(preferences: UserPreferences, db: Session = Depends(get_db)):

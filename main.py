@@ -708,7 +708,7 @@ def _fetch_courses(
             c.degree_titles,
             u.university_name,
             u.country,
-            COALESCE(JSON_ARRAYAGG(DISTINCT s.skill_name), JSON_ARRAY()) AS skills_json,
+            COALESCE(JSON_ARRAYAGG(s.skill_name), JSON_ARRAY()) AS skills_json,
             {score_expr} AS score
         FROM Course c
         JOIN University u ON u.university_id = c.university_id
@@ -3149,6 +3149,133 @@ def search_skill(
         cursor.close()
         conn.close()
 
+SKILL_AREA_KEYWORDS = {
+    "Software Development": [
+        "programming", "software", "java", "python", "coding",
+        "development", "algorithms", "data structures"
+    ],
+    "Data Analysis": [
+        "data analysis", "statistics", "analytics", "data mining",
+        "visualization", "business intelligence"
+    ],
+    "Artificial Intelligence": [
+        "artificial intelligence", "machine learning", "deep learning",
+        "neural", "computer vision", "nlp", "natural language processing"
+    ],
+    "Cloud Computing": [
+        "cloud", "docker", "kubernetes", "devops",
+        "distributed systems", "microservices"
+    ],
+    "Cybersecurity": [
+        "cybersecurity", "security", "cryptography",
+        "network security", "information security"
+    ],
+}
+
+
+@app.get("/analytics/course_skill_area_coverage", tags=["Analytics"])
+def course_skill_area_coverage(
+    university: Optional[str] = Query(None),
+    degree: Optional[str] = Query(None),
+):
+    """
+    Computes curriculum coverage per skill area.
+
+    Coverage score = percentage of courses that include at least one skill
+    belonging to the selected skill area.
+    """
+
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    where = []
+    params = []
+
+    if university:
+        where.append("LOWER(u.university_name) LIKE LOWER(%s)")
+        params.append(f"%{university}%")
+
+    if degree:
+        where.append("LOWER(CAST(c.degree_titles AS CHAR)) LIKE LOWER(%s)")
+        params.append(f"%{degree}%")
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    sql = f"""
+        SELECT
+            c.course_id,
+            c.lesson_name,
+            s.skill_name
+        FROM Course c
+        JOIN University u ON u.university_id = c.university_id
+        LEFT JOIN CourseSkill cs ON cs.course_id = c.course_id
+        LEFT JOIN Skill s ON s.skill_id = cs.skill_id
+        {where_sql}
+    """
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+
+        course_skills = defaultdict(set)
+
+        for row in rows:
+            course_id = row["course_id"]
+            skill_name = row.get("skill_name")
+            if skill_name:
+                course_skills[course_id].add(skill_name.lower())
+
+        total_courses = len(course_skills)
+
+        if total_courses == 0:
+            return {
+                "total_courses": 0,
+                "coverage": [],
+                "message": "No courses with skills found."
+            }
+
+        results = []
+
+        for area, keywords in SKILL_AREA_KEYWORDS.items():
+            covered_courses = 0
+
+            for skills in course_skills.values():
+                matched = any(
+                    keyword.lower() in skill
+                    for skill in skills
+                    for keyword in keywords
+                )
+
+                if matched:
+                    covered_courses += 1
+
+            coverage_score = round((covered_courses / total_courses) * 100, 2)
+
+            results.append({
+                "skill_area": area,
+                "covered_courses": covered_courses,
+                "total_courses": total_courses,
+                "coverage_score": coverage_score
+            })
+
+        return {
+            "university": university,
+            "degree": degree,
+            "total_courses": total_courses,
+            "coverage": results
+        }
+
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass
 
 @app.post(
     "/db/save_json_dir",
@@ -5156,7 +5283,6 @@ def _guess_lesson_name_from_block(block: str) -> Optional[str]:
 def _guess_course_code_from_block(block: str) -> Optional[str]:
     m = re.search(r"\b([A-Z]{2,10}\d{3,6}|\d{5,6})\b", block or "")
     return m.group(1) if m else None
-
 
 def _looks_like_course_block(block: str) -> bool:
     """Cheap validator for a curriculum/course block."""

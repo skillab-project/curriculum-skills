@@ -134,58 +134,66 @@ class CourseRecommender:
     # ==========================================================
     def build_degree_profiles(self, univ_id: int) -> List[Dict[str, Any]]:
         """
-        Build degree profiles for every program in a university.
-
-        A profile contains:
-            - university_id
-            - program_id
-            - degree_title
-            - degree_type
-            - skills (sorted list of skill names)
-            - courses (sorted list of course names)
-
-        This function reads the relationships from the ORM objects.
+        Build degree profiles from Course.degree_titles instead of DegreeProgram.
+        This is needed because the populated degree data is stored at Course level.
         """
-        profiles: List[Dict[str, Any]] = []
         university = self.get_university(univ_id)
-        if not university or not getattr(university, "programs", []):
+        if not university:
             return []
 
-        for program in university.programs:
-            program_id = getattr(program, "program_id", None)
-            degree_type = (getattr(program, "degree_type", "") or "").strip()
-            # degree_titles may be stored in various formats; parse robustly
-            titles = self._parse_titles(getattr(program, "degree_titles", []))
-            program_courses = getattr(program, "courses", [])
-            # Collect unique course names for the program
-            courses = sorted({
-                (c.lesson_name or "").strip()
-                for c in program_courses
-                if getattr(c, "lesson_name", None)
+        grouped = defaultdict(lambda: {
+            "university_id": univ_id,
+            "program_id": -1,
+            "degree_title": "",
+            "degree_type": "Other",
+            "skills": set(),
+            "courses": set(),
+        })
+
+        for course in getattr(university, "courses", []) or []:
+            titles = self._parse_titles(getattr(course, "degree_titles", None))
+            if not titles:
+                continue
+
+            lesson_name = (getattr(course, "lesson_name", "") or "").strip()
+
+            course_skills = set()
+            for cs in getattr(course, "skills", []) or []:
+                if getattr(cs, "skill", None):
+                    skill_name = (cs.skill.skill_name or "").strip()
+                    if skill_name:
+                        course_skills.add(skill_name)
+
+            for title in titles:
+                clean_title = title.strip()
+                if not clean_title:
+                    continue
+
+                item = grouped[clean_title]
+                item["degree_title"] = clean_title
+
+                lower = clean_title.lower()
+                if any(x in lower for x in ["master", "msc", "m.sc", "ma"]):
+                    item["degree_type"] = "MSc/MA"
+                elif any(x in lower for x in ["bachelor", "bsc", "b.sc", "ba"]):
+                    item["degree_type"] = "BSc/BA"
+
+                if lesson_name:
+                    item["courses"].add(lesson_name)
+
+                item["skills"].update(course_skills)
+
+        profiles = []
+        for item in grouped.values():
+            profiles.append({
+                "university_id": item["university_id"],
+                "program_id": item["program_id"],
+                "degree_title": item["degree_title"],
+                "degree_type": item["degree_type"],
+                "skills": sorted(item["skills"]),
+                "courses": sorted(item["courses"]),
             })
 
-            # Collect unique skill names referenced by the program's courses
-            skills = set()
-            for course in program_courses:
-                for cs in getattr(course, "skills", []):
-                    if getattr(cs, "skill", None):
-                        skill_name = (cs.skill.skill_name or "").strip()
-                        if skill_name:
-                            skills.add(skill_name)
-            skills = sorted(list(skills))
-
-            # Create a profile entry per declared degree title
-            for title in titles:
-                if not title:
-                    continue
-                profiles.append({
-                    "university_id": univ_id,
-                    "program_id": program_id,
-                    "degree_title": title,
-                    "degree_type": degree_type,
-                    "skills": skills,
-                    "courses": courses,
-                })
         return profiles
 
     # ==========================================================

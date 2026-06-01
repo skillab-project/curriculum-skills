@@ -1,7 +1,7 @@
 # backend/core.py
 from typing import List, Dict, Any, Optional, Set
 from sqlalchemy.orm import Session
-from recommendation_system.backend.models import University
+from recommendation_system.backend.models import University, Course
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
@@ -18,19 +18,10 @@ class UniversityRecommender:
     University recommender system for suggesting similar universities and
     recommending degree programs with enriched skill sets.
 
-    The recommender combines:
-    - TF-IDF semantic similarity
-    - Cosine similarity
-    - Jaccard-like skill compatibility
-    - Frequency-based scoring
-    - Novelty scoring
-    - Skill enrichment scoring
-
-    It also includes:
-    - Case-insensitive matching
-    - Error-safe handling
-    - Optional caching for faster lookup
-    - Weighted scoring model
+    IMPORTANT:
+    This version reads degree names primarily from Course.degree_titles because
+    the current curriculum database stores populated degree title information
+    at course level. DegreeProgram.degree_titles is used only as a fallback.
     """
 
     def __init__(
@@ -39,18 +30,10 @@ class UniversityRecommender:
         weights: Optional[Dict[str, float]] = None,
         cache_enabled: bool = True,
     ):
-        """
-        Initialize the recommender.
-
-        :param db: SQLAlchemy session
-        :param weights: Optional custom scoring weights
-        :param cache_enabled: Enables caching of university profiles
-        """
         self.db = db
         self._profile_cache: Dict[int, Dict[str, Any]] = {}
         self.cache_enabled = cache_enabled
 
-        # Default scoring weights
         default = {
             "frequency": 0.30,
             "novelty": 0.25,
@@ -58,34 +41,160 @@ class UniversityRecommender:
             "skill_enrichment": 0.15,
         }
 
-        # Merge and normalize custom weights
         if weights:
             merged = default.copy()
             merged.update(weights)
             total = sum(merged.values())
-            if total == 0:
-                logger.warning("Provided weights sum to 0. Reverting to defaults.")
-                merged = default
-            else:
-                merged = {k: v / total for k, v in merged.items()}
-            self.weights = merged
+            self.weights = default if total == 0 else {k: v / total for k, v in merged.items()}
         else:
             self.weights = default
 
     # -------------------------------------------------------------------------
-    # Build university profile (skills, courses, degrees)
+    # Degree-title parsing helpers
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _clean_degree_title(title: Any) -> str:
+        """Return a clean degree-title string."""
+        if title is None:
+            return ""
+        title = str(title).strip()
+        if not title:
+            return ""
+
+        # Remove noisy punctuation but keep common degree-title symbols and Greek.
+        title = re.sub(r"[^a-zA-Z0-9 \-&/().,\u0370-\u03FF\u1F00-\u1FFF]", "", title)
+        title = re.sub(r"\s+", " ", title).strip()
+        return title
+
+    @classmethod
+    def _extract_degree_titles_from_value(cls, raw: Any) -> List[str]:
+        """
+        Parse degree titles from Course.degree_titles or DegreeProgram.degree_titles.
+
+        Supports:
+        - JSON list stored as string
+        - JSON object stored as string
+        - Python list
+        - Python dict
+        - plain string
+        - nested dict/list structures
+        """
+        if raw is None:
+            return []
+
+        parsed = raw
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = raw
+
+        titles: List[str] = []
+
+        def walk(value: Any):
+            if value is None:
+                return
+
+            if isinstance(value, str):
+                cleaned = cls._clean_degree_title(value)
+                if cleaned and cleaned.lower() not in {"unknown", "unknown degree", "n/a", "none", "null"}:
+                    titles.append(cleaned)
+
+            elif isinstance(value, (int, float)):
+                cleaned = cls._clean_degree_title(value)
+                if cleaned:
+                    titles.append(cleaned)
+
+            elif isinstance(value, dict):
+                # Prefer likely title/name fields.
+                likely_keys = (
+                    "degree_title",
+                    "degree_titles",
+                    "degree",
+                    "title",
+                    "name",
+                    "program",
+                    "programme",
+                    "label",
+                    "value",
+                    "en",
+                    "el",
+                )
+                found_likely = False
+                for key in likely_keys:
+                    if key in value:
+                        found_likely = True
+                        walk(value[key])
+
+                # If no obvious title key exists, inspect all values.
+                if not found_likely:
+                    for v in value.values():
+                        walk(v)
+
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    walk(item)
+
+            else:
+                cleaned = cls._clean_degree_title(value)
+                if cleaned:
+                    titles.append(cleaned)
+
+        walk(parsed)
+
+        # Preserve deterministic order while removing duplicates.
+        seen = set()
+        out = []
+        for title in titles:
+            key = title.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(title)
+        return out
+
+    @staticmethod
+    def _infer_degree_type_from_title(title: str) -> str:
+        deg_lower = (title or "").lower()
+        if re.search(r"\b(master|msc|m\.sc|ma|m\.a)\b", deg_lower):
+            return "MSc/MA"
+        if re.search(r"\b(phd|doctorate|doctoral)\b", deg_lower):
+            return "PhD"
+        if re.search(r"\b(bachelor|bsc|b\.sc|ba|b\.a)\b", deg_lower):
+            return "BSc/BA"
+        return "Other"
+
+    @staticmethod
+    def _course_skill_names(course: Course) -> Set[str]:
+        """Extract skill names from a Course.skills / CourseSkill relationship."""
+        names: Set[str] = set()
+        for cs in getattr(course, "skills", []) or []:
+            skill_obj = getattr(cs, "skill", None)
+            if not skill_obj:
+                continue
+            skill_name = (getattr(skill_obj, "skill_name", "") or "").strip()
+            if skill_name:
+                names.add(skill_name)
+        return names
+
+    # -------------------------------------------------------------------------
+    # Build university profile from Course.degree_titles
     # -------------------------------------------------------------------------
     def build_university_profile(self, university_id: int) -> Optional[Dict[str, Any]]:
         """
-        Construct a profile for a university, including:
-        - All unique skills present in university courses
-        - All course names
-        - All degree titles
+        Construct a profile for a university.
 
-        Uses caching for performance.
+        Degree titles are read primarily from Course.degree_titles because this
+        field is populated in the current curriculum database. The profile includes:
 
-        :param university_id: The university to index
-        :return: A structured dictionary profile
+        - skills: all unique skill names in the university
+        - skills_raw_names: same skill names, preserved for scoring
+        - courses: all course names
+        - degrees: all degree titles found in Course.degree_titles
+        - degree_skills: degree title -> skills observed in courses belonging to it
+        - degree_courses: degree title -> course names belonging to it
         """
         if self.cache_enabled and university_id in self._profile_cache:
             return self._profile_cache[university_id]
@@ -103,50 +212,55 @@ class UniversityRecommender:
             "skills_raw_names": set(),
             "courses": [],
             "degrees": set(),
+            "degree_skills": defaultdict(set),
+            "degree_courses": defaultdict(set),
         }
 
-        # Extract courses and their skills
+        # Main source: Course.degree_titles
         for course in getattr(university, "courses", []) or []:
-            lesson_name = getattr(course, "lesson_name", None)
+            lesson_name = (getattr(course, "lesson_name", "") or "").strip()
             if lesson_name:
-                profile["courses"].append(lesson_name.strip())
+                profile["courses"].append(lesson_name)
 
-            # Extract raw skill objects linked to the course
-            for cs in getattr(course, "skills", []) or []:
-                skill_obj = getattr(cs, "skill", None)
-                if skill_obj:
-                    skill_name = (getattr(skill_obj, "skill_name", "") or "").strip()
-                    if skill_name:
-                        profile["skills"].add(skill_name)
-                        profile["skills_raw_names"].add(skill_name)
+            course_skills = self._course_skill_names(course)
+            profile["skills"].update(course_skills)
+            profile["skills_raw_names"].update(course_skills)
 
-        # Extract degree titles
-        for program in getattr(university, "programs", []) or []:
-            titles = getattr(program, "degree_titles", None)
-            if not titles:
-                continue
+            course_degree_titles = self._extract_degree_titles_from_value(
+                getattr(course, "degree_titles", None)
+            )
 
-            # Normalize title lists
-            if isinstance(titles, str):
-                try:
-                    titles = json.loads(titles)
-                except Exception:
-                    titles = [titles]
-            if not isinstance(titles, list):
-                titles = [titles]
+            # If Course.degree_titles is empty, optionally fall back to program title.
+            if not course_degree_titles and getattr(course, "program", None):
+                course_degree_titles = self._extract_degree_titles_from_value(
+                    getattr(course.program, "degree_titles", None)
+                )
 
-            for title in titles:
-                if not title:
-                    continue
-                clean_title = re.sub(r"[^a-zA-Z0-9 \-&]", "", str(title)).strip()
-                if clean_title:
-                    profile["degrees"].add(clean_title)
+            for degree_title in course_degree_titles:
+                profile["degrees"].add(degree_title)
+                if lesson_name:
+                    profile["degree_courses"][degree_title].add(lesson_name)
+                profile["degree_skills"][degree_title].update(course_skills)
 
-        # Sort to maintain deterministic structure
+        # Fallback only: include DegreeProgram.degree_titles if no course-level titles exist.
+        if not profile["degrees"]:
+            for program in getattr(university, "programs", []) or []:
+                for degree_title in self._extract_degree_titles_from_value(getattr(program, "degree_titles", None)):
+                    profile["degrees"].add(degree_title)
+
+        # Convert sets/defaultdicts to stable JSON-safe lists.
         profile["skills"] = sorted(profile["skills"])
-        profile["skills_raw_names"] = sorted(list(profile["skills_raw_names"]))
-        profile["courses"] = sorted(list({c for c in profile["courses"] if c}))
+        profile["skills_raw_names"] = sorted(profile["skills_raw_names"])
+        profile["courses"] = sorted(set(profile["courses"]))
         profile["degrees"] = sorted(profile["degrees"])
+        profile["degree_skills"] = {
+            degree: sorted(skills)
+            for degree, skills in profile["degree_skills"].items()
+        }
+        profile["degree_courses"] = {
+            degree: sorted(courses)
+            for degree, courses in profile["degree_courses"].items()
+        }
 
         if self.cache_enabled:
             self._profile_cache[university_id] = profile
@@ -154,21 +268,13 @@ class UniversityRecommender:
         return profile
 
     # -------------------------------------------------------------------------
-    # Find similar universities based on skills + courses + degrees
+    # Find similar universities based on skills + courses + Course.degree_titles
     # -------------------------------------------------------------------------
     def find_similar_universities(self, target_univ_id: int, top_n: int = 5) -> List[Dict[str, Any]]:
-        """
-        Computes semantic similarity between the target university and all others
-        using TF-IDF + cosine similarity.
-
-        :param target_univ_id: ID of the target university
-        :param top_n: Number of results to return
-        """
         target_profile = self.build_university_profile(target_univ_id)
         if not target_profile:
             return []
 
-        # Fetch remaining universities
         all_univs = (
             self.db.query(University)
             .filter(University.university_id != target_univ_id)
@@ -178,21 +284,17 @@ class UniversityRecommender:
         docs = []
         valid_univs = []
 
-        # Construct text representations for comparison
         for u in all_univs:
             p = self.build_university_profile(getattr(u, "university_id"))
             if not p:
                 continue
 
-            parts = []
-            if p["skills"]:
-                parts.append(" ".join(p["skills"]))
-            if p["courses"]:
-                parts.append(" ".join(p["courses"]))
-            if p["degrees"]:
-                parts.append(" ".join(p["degrees"]))
+            combined_text = " ".join(
+                (p.get("skills") or []) +
+                (p.get("courses") or []) +
+                (p.get("degrees") or [])
+            ).strip()
 
-            combined_text = " ".join(parts).strip()
             if combined_text:
                 docs.append(combined_text)
                 valid_univs.append(u)
@@ -200,18 +302,15 @@ class UniversityRecommender:
         if not docs:
             return []
 
-        # Target university text representation
-        target_parts = []
-        if target_profile["skills"]:
-            target_parts.append(" ".join(target_profile["skills"]))
-        if target_profile["courses"]:
-            target_parts.append(" ".join(target_profile["courses"]))
-        if target_profile["degrees"]:
-            target_parts.append(" ".join(target_profile["degrees"]))
+        target_text = " ".join(
+            (target_profile.get("skills") or []) +
+            (target_profile.get("courses") or []) +
+            (target_profile.get("degrees") or [])
+        ).strip()
 
-        target_text = " ".join(target_parts).strip()
+        if not target_text:
+            return []
 
-        # Compute cosine similarity
         try:
             vectorizer = TfidfVectorizer()
             vectors = vectorizer.fit_transform(docs + [target_text])
@@ -220,11 +319,7 @@ class UniversityRecommender:
             logger.exception("Error computing similarity for universities: %s", e)
             return []
 
-        ranked = sorted(
-            zip(valid_univs, sims),
-            key=lambda x: x[1],
-            reverse=True
-        )[:top_n]
+        ranked = sorted(zip(valid_univs, sims), key=lambda x: x[1], reverse=True)[:top_n]
 
         return [
             {
@@ -237,36 +332,34 @@ class UniversityRecommender:
         ]
 
     # -------------------------------------------------------------------------
-    # Compute similarity for skills related to a specific degree
+    # Recommend skills for a degree using Course.degree_titles grouping
     # -------------------------------------------------------------------------
     def _get_degree_skills_similarity(
-        self, similar_univ_ids: List[int], target_degree: str, target_skills_raw: Set[str]
+        self,
+        similar_univ_ids: List[int],
+        target_degree: str,
+        target_skills_raw: Set[str],
     ) -> List[Dict[str, Any]]:
         """
-        Computes recommended skill additions for a specific degree by analyzing
-        similar universities offering the same degree.
-
-        The score combines:
-        - Frequency across universities
-        - TF-IDF semantic weight
-        - Normalized spread adjustment
-
-        :return: Top skill recommendations sorted by score
+        Recommend skill additions for a degree by reading the skills attached to
+        courses whose Course.degree_titles contain target_degree.
         """
         skill_counter = defaultdict(int)
         all_skills = []
-
         target_skills_lc = {s.lower() for s in target_skills_raw}
 
-        # Collect skills from universities offering the same degree
         for univ_id in similar_univ_ids:
             profile = self.build_university_profile(univ_id)
-            if not profile or target_degree not in profile["degrees"]:
+            if not profile:
+                continue
+
+            degree_skills = set((profile.get("degree_skills") or {}).get(target_degree, []))
+            if not degree_skills:
                 continue
 
             filtered = [
-                s for s in profile["skills_raw_names"]
-                if s.lower() not in target_skills_lc
+                s for s in degree_skills
+                if s and s.lower() not in target_skills_lc
             ]
 
             all_skills.extend(filtered)
@@ -276,7 +369,6 @@ class UniversityRecommender:
         if not skill_counter:
             return []
 
-        # Compute TF-IDF weighting
         try:
             vectorizer = TfidfVectorizer(lowercase=True)
             vectors = vectorizer.fit_transform([" ".join(all_skills)])
@@ -287,14 +379,12 @@ class UniversityRecommender:
         max_count = max(skill_counter.values())
         raw_scores = []
 
-        # Merge frequency + tf-idf
         for skill, count in skill_counter.items():
             base_score = count / max_count
             tfidf_weight = weights.get(skill.lower(), 0.4)
             combined = 0.6 * base_score + 0.4 * tfidf_weight
             raw_scores.append((skill, combined))
 
-        # Normalize spread for strengthened scoring contrast
         min_s = min(v for _, v in raw_scores)
         max_s = max(v for _, v in raw_scores)
         spread = max(max_s - min_s, 1.0)
@@ -306,28 +396,22 @@ class UniversityRecommender:
             final_score = round(0.7 + 0.25 * boosted, 3)
             ranked_skills.append({
                 "skill_name": skill,
-                "skill_score": round(final_score, 3)
+                "skill_score": round(final_score, 3),
             })
 
         ranked_skills.sort(key=lambda x: x["skill_score"], reverse=True)
         return ranked_skills[:5]
 
     # -------------------------------------------------------------------------
-    # Recommend degrees + enriched skills
+    # Recommend degrees + enriched skills using Course.degree_titles
     # -------------------------------------------------------------------------
     def suggest_degrees_with_skills(self, target_univ_id: int, top_n: int = 5) -> List[Dict[str, Any]]:
         """
-        Suggest new degrees for a university, along with a breakdown of
-        enriched skills that the university can add.
+        Suggest degree titles for a university.
 
-        The scoring model considers:
-        - Frequency across similar universities
-        - Skill compatibility
-        - Skill enrichment
-        - Novelty w.r.t semantic features
-
-        :param target_univ_id: The university to enrich
-        :param top_n: Max number of degrees to return
+        Degree candidates are taken from Course.degree_titles of similar
+        universities and filtered against Course.degree_titles already present
+        in the target university.
         """
         similar_univs = self.find_similar_universities(target_univ_id, top_n=10)
         target_profile = self.build_university_profile(target_univ_id)
@@ -336,12 +420,14 @@ class UniversityRecommender:
             return []
 
         similar_univ_ids = [u["university_id"] for u in similar_univs]
-        target_skills_raw = set(target_profile["skills_raw_names"])
-        target_degrees = set(target_profile["degrees"])
+        target_skills_raw = set(target_profile.get("skills_raw_names") or [])
+        target_skills = set(target_profile.get("skills") or [])
+        target_degrees = set(target_profile.get("degrees") or [])
+
         target_text = " ".join(
-            target_profile["skills"] +
-            target_profile["courses"] +
-            target_profile["degrees"]
+            (target_profile.get("skills") or []) +
+            (target_profile.get("courses") or []) +
+            (target_profile.get("degrees") or [])
         )
 
         degree_texts = {}
@@ -349,30 +435,39 @@ class UniversityRecommender:
         degree_compat = defaultdict(float)
         degree_skill_bonus = defaultdict(int)
 
-        # Extract features from similar universities
         for u in similar_univs:
             p = self.build_university_profile(u["university_id"])
             if not p:
                 continue
 
-            new_degrees = set(p["degrees"]) - target_degrees
-            new_skills = set(p["skills"]) - set(target_profile["skills"])
+            candidate_degrees = set(p.get("degrees") or []) - target_degrees
+            p_skills = set(p.get("skills") or [])
+            p_skills_raw_lc = {s.lower() for s in (p.get("skills_raw_names") or [])}
+            target_skills_lc = {s.lower() for s in (target_profile.get("skills_raw_names") or [])}
 
-            combined_text = " ".join(p["skills"] + p["courses"])
+            for deg in candidate_degrees:
+                deg_skills = set((p.get("degree_skills") or {}).get(deg, []))
+                deg_courses = set((p.get("degree_courses") or {}).get(deg, []))
 
-            for deg in new_degrees:
+                if not deg_skills and not deg_courses:
+                    continue
+
                 degree_freq[deg] += 1
-                degree_texts[deg] = degree_texts.get(deg, "") + " " + combined_text
 
-                p_skills_raw = {s.lower() for s in p["skills_raw_names"]}
-                target_skills_lc = {s.lower() for s in target_profile["skills_raw_names"]}
+                # Degree-specific text from course-level degree group.
+                degree_texts[deg] = degree_texts.get(deg, "") + " " + " ".join(
+                    list(deg_skills) + list(deg_courses) + [deg]
+                )
 
-                overlap = len(p_skills_raw & target_skills_lc)
-                union_count = len(p_skills_raw | target_skills_lc)
-                compat = overlap / (union_count + 1)
-
+                # Compatibility with target university skill profile.
+                deg_skills_lc = {s.lower() for s in deg_skills}
+                overlap = len(deg_skills_lc & target_skills_lc)
+                union_count = len(deg_skills_lc | target_skills_lc)
+                compat = overlap / (union_count + 1) if union_count else 0.0
                 degree_compat[deg] += compat
-                degree_skill_bonus[deg] += len(new_skills)
+
+                # Skill enrichment: new degree-specific skills not present in target.
+                degree_skill_bonus[deg] += len(deg_skills - target_skills)
 
         if not degree_texts:
             return []
@@ -389,15 +484,13 @@ class UniversityRecommender:
             sims = [0.0] * len(degrees)
 
         final = []
-
         max_freq = max(degree_freq.values()) if degree_freq else 1
         max_skill_bonus = max(degree_skill_bonus.values()) if degree_skill_bonus else 1
 
-        # Build final degree scoring
         for i, deg in enumerate(degrees):
             freq_score = degree_freq[deg] / max_freq
             novelty_score = max(0.0, min(1.0, 1.0 - float(sims[i])))
-            compat_score = degree_compat[deg] / degree_freq[deg]
+            compat_score = degree_compat[deg] / degree_freq[deg] if degree_freq[deg] else 0.0
             skill_enrichment_score = degree_skill_bonus[deg] / max_skill_bonus
 
             total_score = (
@@ -407,30 +500,24 @@ class UniversityRecommender:
                 self.weights["skill_enrichment"] * skill_enrichment_score
             )
 
-            # Simple degree type classifier
-            deg_lower = deg.lower()
-            if re.search(r'\b(master|msc|ma|m\.sc|msc)\b', deg_lower):
-                degree_type = 'MSc/MA'
-            elif re.search(r'\b(phd|doctorate|doctoral)\b', deg_lower):
-                degree_type = 'PhD'
-            else:
-                degree_type = 'BSc/BA'
-
             top_skills = self._get_degree_skills_similarity(
-                similar_univ_ids, deg, target_skills_raw
+                similar_univ_ids,
+                deg,
+                target_skills_raw,
             )
 
             final.append({
                 "degree": deg,
                 "score": round(total_score, 3),
-                "degree_type": degree_type,
+                "degree_type": self._infer_degree_type_from_title(deg),
                 "top_skills": top_skills,
                 "metrics": {
                     "frequency": round(freq_score * 100),
                     "compatibility": round(compat_score * 100),
                     "skill_enrichment": int(degree_skill_bonus[deg]),
-                    "novelty": round(novelty_score * 100)
-                }
+                    "novelty": round(novelty_score * 100),
+                    "degree_source": "Course.degree_titles",
+                },
             })
 
-        return sorted(final, key=lambda x: x['score'], reverse=True)[:top_n]
+        return sorted(final, key=lambda x: x["score"], reverse=True)[:top_n]

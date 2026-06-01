@@ -10,11 +10,11 @@ from recommendation_system.backend.models import Base  # Υποθέτουμε ό
 # ============================
 # Περιβαλλοντικές μεταβλητές για σύνδεση στη βάση
 # ============================
-DB_HOST = os.getenv("DATABASE_HOST", "localhost")        # π.χ. "db" στο Docker, "localhost" τοπικά
-DB_PORT = os.getenv("DATABASE_PORT", "3306")
-DB_USER = os.getenv("DATABASE_USER", "root")
-DB_PASSWORD = os.getenv("DATABASE_PASSWORD", "")
-DB_NAME = os.getenv("DATABASE_NAME", "recommender_test1")
+DB_HOST = os.getenv("DB_HOST", os.getenv("DATABASE_HOST", "mysql-curriculum-skill"))
+DB_PORT = os.getenv("DB_PORT", os.getenv("DATABASE_PORT", "3306"))
+DB_USER = os.getenv("DB_USER", os.getenv("DATABASE_USER", "root"))
+DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("DATABASE_PASSWORD", "root"))
+DB_NAME = os.getenv("DB_NAME", os.getenv("DATABASE_NAME", "skillcrawl"))
 
 # ============================
 # Connection string
