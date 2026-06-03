@@ -6321,6 +6321,51 @@ def db_ping():
             pass
 
 
+from fastapi.routing import APIRoute
+
+def add_prefixed_routes(app: FastAPI, prefix: str = "/curriculum-skills"):
+    existing = {
+        (tuple(sorted(route.methods)), route.path)
+        for route in app.router.routes
+        if isinstance(route, APIRoute)
+    }
+
+    for route in list(app.router.routes):
+        if not isinstance(route, APIRoute):
+            continue
+
+        if route.path.startswith(prefix):
+            continue
+
+        new_path = prefix + route.path
+        key = (tuple(sorted(route.methods)), new_path)
+
+        if key in existing:
+            continue
+
+        app.router.add_api_route(
+            new_path,
+            route.endpoint,
+            response_model=route.response_model,
+            status_code=route.status_code,
+            tags=route.tags,
+            dependencies=route.dependencies,
+            summary=route.summary,
+            description=route.description,
+            response_description=route.response_description,
+            responses=route.responses,
+            deprecated=route.deprecated,
+            methods=list(route.methods),
+            include_in_schema=False,
+            response_class=route.response_class,
+            name=f"{route.name}_prefixed",
+            callbacks=route.callbacks,
+            openapi_extra=route.openapi_extra,
+        )
+
+add_prefixed_routes(app)
+
+
 if __name__ == "__main__":
     import uvicorn
 
