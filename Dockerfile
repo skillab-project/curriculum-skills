@@ -16,10 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-COPY sql_init/backup.tar.gz /sql_init/backup.tar.gz
-RUN mkdir -p /docker-entrypoint-initdb.d \
- && tar -xzf /sql_init/backup.tar.gz -C /docker-entrypoint-initdb.d
+RUN mkdir -p /docker-entrypoint-initdb.d
 
+COPY sql_init/skillcrawl.sql.gz /docker-entrypoint-initdb.d/skillcrawl.sql.gz
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
