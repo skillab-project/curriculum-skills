@@ -24,9 +24,9 @@ services:
       timeout: 3s
       retries: 10
 
-  esco-skill-extractor:
-    image: konstantinospetrakis/esco-skill-extractor
-    container_name: esco-skill-extractor
+  # esco-skill-extractor:
+  #   image: konstantinospetrakis/esco-skill-extractor
+  #   container_name: esco-skill-extractor
     # ports:
     #   - "8081:5000"
 
@@ -34,8 +34,8 @@ services:
     depends_on:
       mysql-curriculum-skill:
         condition: service_healthy
-      esco-skill-extractor:
-        condition: service_started
+      # esco-skill-extractor:
+      #   condition: service_started
     container_name: curriculum-skills
     build: .
     image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
@@ -58,7 +58,7 @@ services:
       - DB_NAME=skillcrawl
       - LONGTERM_STORAGE_DIR=/app/longterm_storage
       - TRENDS_API_BASE_URL=https://portal.skillab-project.eu/future-technology-trends-identifier
-      - REQUIRED_SKILLS_SERVICE_URL=https://portal.skillab-project.eu/required-skills
+      - REQUIRED_SKILLS_SERVICE_URL=https://portal.skillab-project.eu/diversity-analysis
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=gemma3:4b
       - OLLAMA_HOST=http://host.docker.internal:11434

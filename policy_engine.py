@@ -103,7 +103,7 @@ class EducationRecommendationSystem:
             resp = requests.post(
                 f"{self.service2_url}/required_skills_service",
                 json=payload,
-                timeout=10
+                timeout=60
             )
 
             if resp.status_code == 200 and resp.text:

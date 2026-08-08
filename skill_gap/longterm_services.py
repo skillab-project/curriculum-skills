@@ -132,7 +132,7 @@ def track_job_status(job_id: str) -> Dict[str, Any]:
     try:
         resp = requests.get(
             f"{TRENDS_BASE_URL}/jobs/{job_id}",
-            timeout=30
+            timeout=60
         )
         resp.raise_for_status()
         return resp.json()
