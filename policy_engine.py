@@ -27,8 +27,8 @@ class EducationRecommendationSystem:
         self.service2_url = service2_url
 
     # ------------------------------------------------------------------
-    # STEP 1: Skills from Trig — top-N required skills per occupation
-    #         Επιστρέφει skills με URL + label (matching γίνεται με URL)
+    # STEP 1: Skills from Trig — top-N required skills per occupation.
+    #         Returns skills with URL + label (matching is done by URL).
     # ------------------------------------------------------------------
     def _fetch_skills_for_occupation(
         self,
@@ -37,14 +37,14 @@ class EducationRecommendationSystem:
         top_n: Optional[int] = None
     ) -> tuple:
         """
-        HTTP request για ένα occupation στο Trig.
+        HTTP request to Trig for a single occupation.
 
         Trig response item:
           {"Role": ..., "Skill": <label>, "Pillar": ...,
            "Importance": <0..1>, "SkillId": <esco url>}
 
-        Επιστρέφει (occupation, [ {"url": ..., "label": ..., "importance": ...} ])
-        ταξινομημένα κατά Importance φθίνουσα, μέχρι top_n.
+        Returns (occupation, [ {"url": ..., "label": ..., "importance": ...} ])
+        sorted by Importance descending, capped at top_n.
         """
         try:
             payload = {"occupation_name": occupation}
@@ -63,8 +63,8 @@ class EducationRecommendationSystem:
 
             data = resp.json()
 
-            # Το service επιστρέφει error string μέσα σε λίστα σε αποτυχία
-            # π.χ. ["cannot open the connection"] / ["argument 1 is not a vector"]
+            # On failure, the service returns an error string inside a list,
+            # e.g. ["cannot open the connection"] / ["argument 1 is not a vector"]
             if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
                 logger.warning(f"[{occupation}] Trig error: {data[0]}")
                 return occupation, []
@@ -72,7 +72,7 @@ class EducationRecommendationSystem:
             if not isinstance(data, list):
                 return occupation, []
 
-            # Κράτα (url, label, importance) και φίλτραρε με το threshold
+            # Keep (url, label, importance) and filter by the threshold
             scored = []
             for item in data:
                 if not isinstance(item, dict):
@@ -88,7 +88,7 @@ class EducationRecommendationSystem:
                             "importance": importance
                         })
 
-            # Ταξινόμηση κατά Importance φθίνουσα, μετά slice στο top_n
+            # Sort by Importance descending, then cap at top_n
             scored.sort(key=lambda x: x["importance"], reverse=True)
             if top_n is not None:
                 scored = scored[:top_n]
@@ -102,12 +102,12 @@ class EducationRecommendationSystem:
     def get_required_skills(
         self,
         occupation_titles: List[str],
-        min_val: float = 0.1,
+        min_val: float = 0.0,
         top_n: Optional[int] = 100
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Παράλληλα HTTP requests για όλα τα occupations (max_workers=10).
-        Κάθε occupation επιστρέφει μέχρι top_n skills (url + label + importance).
+        Parallel HTTP requests for all occupations (max_workers=10).
+        Each occupation returns up to top_n skills (url + label + importance).
         """
         occupation_skills = {}
         total = len(occupation_titles)
@@ -137,17 +137,17 @@ class EducationRecommendationSystem:
         return occupation_skills
 
     # ------------------------------------------------------------------
-    # STEP 2: University skills from DB (grouped per university + country)
-    #         Επιστρέφει και το skill_url για URL-based matching
+    # STEP 2: University skills from DB (grouped per university + country).
+    #         Also returns skill_url for URL-based matching.
     # ------------------------------------------------------------------
     def get_all_universities_skills(self) -> Dict[str, Dict[str, Any]]:
         """
-        Επιστρέφει skills ανά πανεπιστήμιο, μαζί με τη χώρα του καθενός.
+        Returns skills per university, together with each university's country.
         {
           university_name: {
             "country": str,
-            "skill_urls": set([...]),   # για matching με το Trig SkillId
-            "skill_names": set([...])   # fallback / εμφάνιση
+            "skill_urls": set([...]),   # for matching against Trig SkillId
+            "skill_names": set([...])   # fallback / display
           }
         }
         """
@@ -189,7 +189,7 @@ class EducationRecommendationSystem:
 
     # ------------------------------------------------------------------
     # STEP 3: Courses from OTHER universities that teach the missing skills
-    #         (matching με skill_url)
+    #         (matched by skill_url).
     # ------------------------------------------------------------------
     def get_courses_from_other_universities(
         self,
@@ -197,9 +197,9 @@ class EducationRecommendationSystem:
         current_university: str
     ) -> Dict[str, List[str]]:
         """
-        Batch IN query πάνω στο s.skill_url. Βρίσκει μαθήματα από ΑΛΛΑ
-        πανεπιστήμια που διδάσκουν τα missing skills. Το dict έχει key
-        το skill label (για ευανάγνωστο output).
+        Batch IN query on s.skill_url. Finds courses from OTHER universities
+        that teach the missing skills. The returned dict is keyed by the
+        skill label (for readable output).
         """
         if not skill_urls:
             return {}
@@ -252,22 +252,22 @@ class EducationRecommendationSystem:
         return result
 
     # ------------------------------------------------------------------
-    # MAIN: Gap analysis per university (+ country aggregate)
+    # MAIN: Gap analysis per university (+ country aggregate).
     # ------------------------------------------------------------------
     def run_analysis(
         self,
         occupations: List[str],
-        skill_threshold: float = 0.1,
+        skill_threshold: float = 0.0,
         top_n: int = 100
     ) -> Dict[str, Any]:
         """
-        Gap analysis με βάση occupations που δίνει ο χρήστης.
+        Gap analysis based on a user-selected list of occupations.
 
-        1. Για κάθε occupation -> top_n required skills από το Trig
+        1. For each occupation -> top_n required skills from Trig
            (url + label + importance).
-        2. Union όλων -> distinct required skills (κλειδί: ESCO url).
-        3. Σύγκριση με τα skill_urls ΚΑΘΕ πανεπιστημίου (DB) -> coverage & gap.
-        4. Aggregate ανά χώρα (union coverage + μέσος όρος παν/μίων).
+        2. Union of all -> distinct required skills (key: ESCO url).
+        3. Compare against each university's skill_urls (DB) -> coverage & gap.
+        4. Aggregate per country (union coverage + average per university).
         """
         occupations = [o.strip() for o in (occupations or []) if o and o.strip()]
         if not occupations:
@@ -279,8 +279,15 @@ class EducationRecommendationSystem:
         )
         req_skills = self.get_required_skills(occupations, skill_threshold, top_n=top_n)
 
+        # Track which occupations returned no skills (so the caller knows)
+        occupations_with_skills = list(req_skills.keys())
+        occupations_without_skills = [o for o in occupations if o not in req_skills]
+
         if not req_skills:
-            return {"error": "No required skills returned for the selected occupations"}
+            return {
+                "error": "No required skills returned for the selected occupations",
+                "occupations_without_skills": occupations_without_skills
+            }
 
         logger.info("Loading university skills from DB...")
         uni_data = self.get_all_universities_skills()
@@ -288,8 +295,8 @@ class EducationRecommendationSystem:
         total_unis = len(uni_data)
         logger.info(f"Starting analysis for {total_unis} universities...")
 
-        # ---- Union όλων των top-N skills -> distinct required set (by URL) ----
-        # url -> label (για ευανάγνωστο output)
+        # ---- Union of all top-N skills -> distinct required set (by URL) ----
+        # url -> label (for readable output)
         url_to_label: Dict[str, str] = {}
         for skills in req_skills.values():
             for sk in skills:
@@ -304,8 +311,8 @@ class EducationRecommendationSystem:
         )
 
         university_results = {}
-        country_present = defaultdict(set)     # union present urls ανά χώρα
-        country_scores = defaultdict(list)     # coverage κάθε παν/μίου ανά χώρα
+        country_present = defaultdict(set)     # union of present urls per country
+        country_scores = defaultdict(list)     # coverage of each university per country
 
         for idx, (uni, data) in enumerate(uni_data.items(), start=1):
             country = data["country"]
@@ -315,14 +322,14 @@ class EducationRecommendationSystem:
             coverage_score = round((len(present_urls) / total_needed) * 100, 2) if total_needed > 0 else 0.0
             missing_urls = all_req_urls - uni_urls
 
-            # missing skills ανά occupation (με labels)
+            # missing skills per occupation (as labels)
             missing_by_occ = {}
             for occ, skills in req_skills.items():
                 occ_missing = [sk["label"] for sk in skills if sk["url"] in missing_urls]
                 if occ_missing:
                     missing_by_occ[occ] = sorted(set(occ_missing))
 
-            # πού διδάσκονται τα missing skills (άλλα παν/μια) — matching με url
+            # where the missing skills are taught (other universities) — matched by url
             missing_courses = {}
             if missing_urls:
                 missing_courses = self.get_courses_from_other_universities(
@@ -339,7 +346,7 @@ class EducationRecommendationSystem:
                 "missing_courses": missing_courses
             }
 
-            # aggregate ανά χώρα
+            # aggregate per country
             country_present[country].update(present_urls)
             country_scores[country].append(coverage_score)
 
@@ -355,8 +362,8 @@ class EducationRecommendationSystem:
             scores = country_scores[country]
             avg_coverage = round(sum(scores) / len(scores), 2) if scores else 0.0
             country_results[country] = {
-                "union_coverage_score": union_coverage,    # τι καλύπτει η χώρα κάπου
-                "avg_university_coverage": avg_coverage,   # μέση κάλυψη ανά παν/μιο
+                "union_coverage_score": union_coverage,    # what the country covers somewhere
+                "avg_university_coverage": avg_coverage,   # average coverage per university
                 "universities_count": len(scores)
             }
 
@@ -365,7 +372,7 @@ class EducationRecommendationSystem:
             f"{len(country_results)} countries."
         )
 
-        # required_skills_per_occupation ως labels (για ευανάγνωστο output)
+        # required_skills_per_occupation as labels (for readable output)
         req_skills_labels = {
             occ: [sk["label"] for sk in skills]
             for occ, skills in req_skills.items()
@@ -373,7 +380,8 @@ class EducationRecommendationSystem:
 
         return {
             "selected_occupations": occupations,
-            "occupations_with_skills": list(req_skills.keys()),
+            "occupations_with_skills": occupations_with_skills,
+            "occupations_without_skills": occupations_without_skills,
             "top_n": top_n,
             "threshold": skill_threshold,
             "total_unique_required_skills": total_needed,

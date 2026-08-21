@@ -37,11 +37,11 @@ def get_db():
 # ==========================================
 SERVICE2_URL = os.getenv(
     "REQUIRED_SKILLS_SERVICE_URL",
-    "https://portal.skillab-project.eu/required-skills"
+    "https://portal.skillab-project.eu/diversity-analysis"
 )
 
 # ==========================================
-# MYSQL MODEL — ανά πανεπιστήμιο, με run_id ανά ανάλυση
+# MYSQL MODEL — per university, with a run_id per analysis
 # ==========================================
 BasePolicy = declarative_base()
 
@@ -49,7 +49,7 @@ BasePolicy = declarative_base()
 class PolicyRecommendation(BasePolicy):
     __tablename__ = "policy_recommendations"
     id = Column(Integer, primary_key=True, index=True)
-    run_id = Column(String(36), nullable=False, index=True)         # μοναδικό ανά ανάλυση
+    run_id = Column(String(36), nullable=False, index=True)          # unique per analysis
     university_name = Column(String(255), nullable=False, index=True)
     country = Column(String(100), nullable=True, index=True)
     coverage_score = Column(Float, nullable=True)
@@ -57,7 +57,7 @@ class PolicyRecommendation(BasePolicy):
     missing_skills_count = Column(Integer, nullable=True)
     missing_departments = Column(JSON, nullable=True)
     missing_courses = Column(JSON, nullable=True)
-    # Παράμετροι ανάλυσης
+    # Analysis parameters
     threshold = Column(Float, nullable=True)
     top_n = Column(Integer, nullable=True)
     occupations = Column(JSON, nullable=True)
@@ -71,16 +71,16 @@ class PolicyAnalyzeRequest(BaseModel):
     occupations: List[str] = Field(
         ...,
         min_items=1,
-        description="Λίστα occupations που επέλεξε ο χρήστης.",
-        example=["Data Scientist", "Software Developer", "Cybersecurity Analyst"]
+        description="List of occupations selected by the user.",
+        example=["Web and multimedia developers", "Web technicians"]
     )
     threshold: float = Field(
-        0.7, ge=0.0, le=1.0,
-        description="Ελάχιστο Value threshold ανά skill."
+        0.0, ge=0.0, le=1.0,
+        description="Minimum Importance threshold per skill (0.0 = rely on top_n)."
     )
     top_n: int = Field(
         100, ge=1, le=500,
-        description="Μέγιστος αριθμός skills ανά occupation (π.χ. top 100)."
+        description="Maximum number of skills per occupation (e.g. top 100)."
     )
 
 
@@ -90,7 +90,7 @@ class PolicyAnalyzeRequest(BaseModel):
 def _save_results_to_db(db: Session, results: dict, run_id: str,
                         occupations: List[str], threshold: float, top_n: int):
     """
-    Κάθε run είναι νέο (μοναδικό run_id) -> πάντα insert, ποτέ overwrite.
+    Each run is new (unique run_id) -> always insert, never overwrite.
     """
     universities = results.get("universities", {})
     count = 0
@@ -162,9 +162,9 @@ def trigger_analysis(
     db: Session = Depends(get_db)
 ):
     """
-    Δέχεται λίστα occupations, τρέχει gap analysis στο background και
-    επιστρέφει ΑΜΕΣΩΣ ένα run_id. Ο χρήστης κάνει poll στο
-    /policy/status/{run_id} και μετά διαβάζει τα /policy/results?run_id=...
+    Accepts a list of occupations, runs the gap analysis in the background,
+    and IMMEDIATELY returns a run_id. The user polls /policy/status/{run_id}
+    and then reads /policy/results?run_id=...
     """
     try:
         BasePolicy.metadata.create_all(bind=engine)
@@ -192,15 +192,15 @@ def trigger_analysis(
     }
 
 
-@router.post("/policy/analyze_sync", summary="Run analysis (Blocking, returns full result)")
+@router.post("/policy/analyze_sync", summary="Run multi-occupation skill-gap analysis (Blocking)")
 def trigger_analysis_sync(
     payload: PolicyAnalyzeRequest = Body(...),
     db: Session = Depends(get_db)
 ):
     """
-    Ίδια λογική αλλά blocking: τρέχει, αποθηκεύει, και επιστρέφει
-    απευθείας το πλήρες αποτέλεσμα (universities + countries) μαζί
-    με το run_id. Κατάλληλο για δοκιμές ή μικρές λίστες occupations.
+    Same logic but blocking: runs, saves, and directly returns the full
+    result (universities + countries + run_id) without polling. Suitable
+    for testing or small occupation lists.
     """
     try:
         BasePolicy.metadata.create_all(bind=engine)
@@ -217,7 +217,8 @@ def trigger_analysis_sync(
     )
 
     if "error" in results:
-        return {"error": results["error"], "run_id": run_id}
+        results["run_id"] = run_id
+        return results
 
     try:
         _save_results_to_db(db, results, run_id, payload.occupations,
@@ -233,8 +234,8 @@ def trigger_analysis_sync(
 @router.get("/policy/status/{run_id}", summary="Check if an analysis run has finished")
 def get_run_status(run_id: str, db: Session = Depends(get_db)):
     """
-    Επιστρέφει αν το background run έχει ολοκληρωθεί (υπάρχουν records)
-    ή είναι ακόμα σε εξέλιξη.
+    Returns whether the background run has completed (records exist) or is
+    still in progress.
     """
     count = db.query(PolicyRecommendation).filter_by(run_id=run_id).count()
     return {
@@ -247,10 +248,9 @@ def get_run_status(run_id: str, db: Session = Depends(get_db)):
 @router.get("/policy/runs", summary="List all analysis runs with their occupations")
 def list_runs(db: Session = Depends(get_db)):
     """
-    Επιστρέφει όλες τις αναλύσεις που έχουν τρέξει (ανά run_id),
-    ώστε ο χρήστης να ξέρει ποιο run αντιστοιχεί σε ποια occupations.
+    Returns every analysis that has been run (per run_id), so the user knows
+    which run corresponds to which occupations.
     """
-    # Ένα record ανά run_id αρκεί για τα metadata (occupations/params είναι ίδια)
     rows = (
         db.query(PolicyRecommendation)
         .order_by(PolicyRecommendation.created_at.desc())
@@ -277,13 +277,13 @@ def list_runs(db: Session = Depends(get_db)):
 def get_results(
     db: Session = Depends(get_db),
     run_id: str = Query(None, description="Filter by a specific analysis run"),
-    country: str = Query(None, description="Optional: Filter by country name"),
-    university: str = Query(None, description="Optional: Filter by university name"),
+    country: str = Query(None, description="Optional: filter by country name"),
+    university: str = Query(None, description="Optional: filter by university name"),
     limit: int = Query(None, ge=1, le=1000)
 ):
     """
-    Coverage/gap ανά πανεπιστήμιο. Δώσε run_id για να πάρεις τα
-    αποτελέσματα μιας συγκεκριμένης ανάλυσης (search coverage by Universities).
+    Per-university coverage/gap. Provide run_id to get the results of a
+    specific analysis (search coverage by Universities).
     """
     try:
         q = db.query(PolicyRecommendation)
@@ -314,8 +314,8 @@ def get_results_by_country(
     run_id: str = Query(None, description="Filter by a specific analysis run")
 ):
     """
-    Συγκεντρωτικό coverage ανά χώρα, υπολογισμένο από τα per-university
-    records ενός run: μέσος όρος coverage και πλήθος πανεπιστημίων.
+    Aggregated coverage per country, computed from the per-university records
+    of a run: average coverage and number of universities.
     """
     try:
         q = db.query(PolicyRecommendation)
