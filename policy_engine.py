@@ -1,10 +1,8 @@
 import os
-import pandas as pd
-import requests
 import logging
+import requests
 import mysql.connector
-from typing import List, Dict, Any
-from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
@@ -23,80 +21,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RecommendationResult:
-    missing_departments: Dict[str, List[str]]
-    missing_courses: Dict[str, List[str]]
-
-
 class EducationRecommendationSystem:
 
-    def __init__(self, service2_url: str, unused_service3_url: str, csv_path: str):
+    def __init__(self, service2_url: str):
         self.service2_url = service2_url
-        self.csv_path = csv_path
 
-    def get_available_sectors(self) -> List[str]:
-        if not os.path.exists(self.csv_path):
-            return []
-        try:
-            try:
-                df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
-            except Exception:
-                df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='latin-1')
-
-            df.columns = df.columns.str.strip().str.replace('"', '')
-
-            if 'Label3' in df.columns:
-                sectors = df['Label3'].dropna().astype(str).str.strip().str.strip('"').unique().tolist()
-                return sorted(sectors)
-            return []
-        except Exception as e:
-            logger.error(f"Error reading sectors: {e}")
-            return []
-
-    def load_occupation_titles_from_csv(self, sector_filter: str = None) -> List[str]:
-        if not os.path.exists(self.csv_path):
-            logger.error(f"CSV file not found at: {self.csv_path}")
-            return []
-
-        try:
-            try:
-                df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
-            except Exception:
-                df = pd.read_csv(self.csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='latin-1')
-
-            df.columns = df.columns.str.strip().str.replace('"', '')
-
-            if sector_filter and 'Label3' in df.columns:
-                logger.info(f"Filtering occupations by sector: '{sector_filter}'")
-                df = df[df['Label3'].astype(str).str.contains(sector_filter, case=False, na=False)]
-
-            occupations = set()
-
-            def clean_text(text):
-                if not isinstance(text, str):
-                    return ""
-                return text.replace("β€™", "'").replace("â€™", "'").strip().strip('"').strip("'")
-
-            if 'Label4' in df.columns:
-                occupations.update(df['Label4'].dropna().apply(clean_text).tolist())
-
-            if 'Label3' in df.columns:
-                occupations.update(df['Label3'].dropna().apply(clean_text).tolist())
-
-            result = [occ for occ in occupations if occ and len(occ) > 2]
-
-            logger.info(f"✅ Loaded {len(result)} occupations (Sector: {sector_filter if sector_filter else 'ALL'}).")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error reading CSV: {e}")
-            return []
-
-    def _fetch_skills_for_occupation(self, occupation: str, min_val: float) -> tuple:
+    # ------------------------------------------------------------------
+    # STEP 1: Skills from Trig — top-N required skills per occupation
+    #         Επιστρέφει skills με URL + label (matching γίνεται με URL)
+    # ------------------------------------------------------------------
+    def _fetch_skills_for_occupation(
+        self,
+        occupation: str,
+        min_val: float,
+        top_n: Optional[int] = None
+    ) -> tuple:
         """
-        Κάνει το HTTP request για ένα occupation και επιστρέφει (occupation, skills).
-        Χρησιμοποιείται από το ThreadPoolExecutor.
+        HTTP request για ένα occupation στο Trig.
+
+        Trig response item:
+          {"Role": ..., "Skill": <label>, "Pillar": ...,
+           "Importance": <0..1>, "SkillId": <esco url>}
+
+        Επιστρέφει (occupation, [ {"url": ..., "label": ..., "importance": ...} ])
+        ταξινομημένα κατά Importance φθίνουσα, μέχρι top_n.
         """
         try:
             payload = {"occupation_name": occupation}
@@ -106,34 +54,71 @@ class EducationRecommendationSystem:
                 timeout=60
             )
 
-            if resp.status_code == 200 and resp.text:
-                data = resp.json()
-                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
-                    if "cannot open" in data[0].lower() or "error" in data[0].lower():
-                        return occupation, []
-                filtered = []
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and item.get('Value', 0) >= min_val:
-                            filtered.append(item.get('Skill'))
-                return occupation, filtered
-            else:
+            if resp.status_code != 200 or not resp.text:
+                logger.warning(
+                    f"[{occupation}] Trig status={resp.status_code} "
+                    f"body={resp.text[:200]}"
+                )
                 return occupation, []
+
+            data = resp.json()
+
+            # Το service επιστρέφει error string μέσα σε λίστα σε αποτυχία
+            # π.χ. ["cannot open the connection"] / ["argument 1 is not a vector"]
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], str):
+                logger.warning(f"[{occupation}] Trig error: {data[0]}")
+                return occupation, []
+
+            if not isinstance(data, list):
+                return occupation, []
+
+            # Κράτα (url, label, importance) και φίλτραρε με το threshold
+            scored = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                importance = item.get('Importance', 0) or 0
+                if importance >= min_val:
+                    url = item.get('SkillId')
+                    label = item.get('Skill')
+                    if url:
+                        scored.append({
+                            "url": url.strip(),
+                            "label": (label or "").strip(),
+                            "importance": importance
+                        })
+
+            # Ταξινόμηση κατά Importance φθίνουσα, μετά slice στο top_n
+            scored.sort(key=lambda x: x["importance"], reverse=True)
+            if top_n is not None:
+                scored = scored[:top_n]
+
+            return occupation, scored
+
         except Exception as e:
             logger.warning(f"Failed to fetch skills for '{occupation}': {e}")
             return occupation, []
 
-    def get_required_skills(self, occupation_titles: List[str], min_val: float = 0.7) -> Dict[str, List[str]]:
+    def get_required_skills(
+        self,
+        occupation_titles: List[str],
+        min_val: float = 0.1,
+        top_n: Optional[int] = 100
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Παράλληλα HTTP requests για όλα τα occupations με ThreadPoolExecutor (max_workers=10).
+        Παράλληλα HTTP requests για όλα τα occupations (max_workers=10).
+        Κάθε occupation επιστρέφει μέχρι top_n skills (url + label + importance).
         """
         occupation_skills = {}
         total = len(occupation_titles)
-        logger.info(f"Fetching required skills for {total} occupations in parallel (max_workers=10)...")
+        logger.info(
+            f"Fetching top-{top_n} required skills (min_importance={min_val}) "
+            f"for {total} occupations in parallel (max_workers=10)..."
+        )
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {
-                executor.submit(self._fetch_skills_for_occupation, occ, min_val): occ
+                executor.submit(self._fetch_skills_for_occupation, occ, min_val, top_n): occ
                 for occ in occupation_titles
             }
 
@@ -146,10 +131,26 @@ class EducationRecommendationSystem:
                 if completed % 50 == 0:
                     logger.info(f"  Progress: {completed}/{total} occupations processed...")
 
-        logger.info(f"✅ Skills fetched for {len(occupation_skills)}/{total} occupations with results.")
+        logger.info(
+            f"✅ Skills fetched for {len(occupation_skills)}/{total} occupations with results."
+        )
         return occupation_skills
 
-    def get_all_countries_skills(self) -> Dict[str, List[str]]:
+    # ------------------------------------------------------------------
+    # STEP 2: University skills from DB (grouped per university + country)
+    #         Επιστρέφει και το skill_url για URL-based matching
+    # ------------------------------------------------------------------
+    def get_all_universities_skills(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Επιστρέφει skills ανά πανεπιστήμιο, μαζί με τη χώρα του καθενός.
+        {
+          university_name: {
+            "country": str,
+            "skill_urls": set([...]),   # για matching με το Trig SkillId
+            "skill_names": set([...])   # fallback / εμφάνιση
+          }
+        }
+        """
         results = {}
         conn = None
         try:
@@ -157,85 +158,92 @@ class EducationRecommendationSystem:
             cursor = conn.cursor(dictionary=True)
 
             query = """
-                SELECT u.country, s.skill_name
+                SELECT u.university_name, u.country, s.skill_name, s.skill_url
                 FROM Skill s
                 JOIN CourseSkill cs ON s.skill_id = cs.skill_id
                 JOIN Course c ON cs.course_id = c.course_id
                 JOIN University u ON c.university_id = u.university_id
-                WHERE s.skill_name IS NOT NULL AND s.skill_name != '' AND u.country IS NOT NULL
+                WHERE u.university_name IS NOT NULL AND u.university_name != ''
             """
             cursor.execute(query)
             rows = cursor.fetchall()
 
-            grouped = defaultdict(list)
+            grouped = defaultdict(lambda: {"country": None, "skill_urls": set(), "skill_names": set()})
             for r in rows:
-                grouped[r["country"]].append(r["skill_name"])
+                uni = r["university_name"]
+                grouped[uni]["country"] = r["country"] or "Unknown"
+                if r.get("skill_url"):
+                    grouped[uni]["skill_urls"].add(r["skill_url"].strip())
+                if r.get("skill_name"):
+                    grouped[uni]["skill_names"].add(r["skill_name"].strip())
 
-            results = dict(grouped)
+            results = {uni: dict(data) for uni, data in grouped.items()}
 
         except Exception as e:
-            logger.error(f"DB Error in get_all_countries_skills: {e}")
+            logger.error(f"DB Error in get_all_universities_skills: {e}")
         finally:
             if conn and conn.is_connected():
                 conn.close()
 
         return results
 
-    def get_courses_from_other_countries(self, skills: List[str], current_country: str) -> Dict[str, List[str]]:
+    # ------------------------------------------------------------------
+    # STEP 3: Courses from OTHER universities that teach the missing skills
+    #         (matching με skill_url)
+    # ------------------------------------------------------------------
+    def get_courses_from_other_universities(
+        self,
+        skill_urls: List[str],
+        current_university: str
+    ) -> Dict[str, List[str]]:
         """
-        Βελτιωμένη έκδοση: χρησιμοποιεί batch IN query αντί για loop ανά skill.
-        Πολύ πιο γρήγορο (1 query αντί για N queries).
+        Batch IN query πάνω στο s.skill_url. Βρίσκει μαθήματα από ΑΛΛΑ
+        πανεπιστήμια που διδάσκουν τα missing skills. Το dict έχει key
+        το skill label (για ευανάγνωστο output).
         """
-        if not skills:
+        if not skill_urls:
             return {}
 
         skill_courses = defaultdict(list)
         conn = None
-
-        # Batch ανά 50 skills για να μην γεμίζει το IN clause
         BATCH_SIZE = 50
 
         try:
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor(dictionary=True)
 
-            logger.info(f"  Fetching courses for {len(skills)} missing skills in '{current_country}' (batch size={BATCH_SIZE})...")
+            logger.info(
+                f"  Fetching courses for {len(skill_urls)} missing skills "
+                f"(excluding '{current_university}', batch size={BATCH_SIZE})..."
+            )
 
-            for i in range(0, len(skills), BATCH_SIZE):
-                batch = skills[i:i + BATCH_SIZE]
+            for i in range(0, len(skill_urls), BATCH_SIZE):
+                batch = skill_urls[i:i + BATCH_SIZE]
                 placeholders = ', '.join(['%s'] * len(batch))
 
                 query = f"""
-                    SELECT s.skill_name, c.lesson_name, u.university_name, u.country
+                    SELECT s.skill_name, s.skill_url, c.lesson_name,
+                           u.university_name, u.country
                     FROM Skill s
                     JOIN CourseSkill cs ON s.skill_id = cs.skill_id
                     JOIN Course c ON cs.course_id = c.course_id
                     JOIN University u ON c.university_id = u.university_id
-                    WHERE s.skill_name IN ({placeholders})
-                    AND u.country <> %s
-                    AND u.country <> 'Unknown'
+                    WHERE s.skill_url IN ({placeholders})
+                    AND u.university_name <> %s
                     LIMIT 500
                 """
-                cursor.execute(query, [*batch, current_country])
+                cursor.execute(query, [*batch, current_university])
                 rows = cursor.fetchall()
 
                 for r in rows:
-                    skill_name = r["skill_name"]
-                    c_name = r["lesson_name"]
-                    u_name = r["university_name"]
-                    u_country = r["country"]
+                    label = r.get("skill_name") or r.get("skill_url")
+                    entry = f"{r['lesson_name']} ({r['university_name']}) - [{r['country']}]"
+                    skill_courses[label].append(entry)
 
-                    if current_country.lower() in u_name.lower():
-                        continue
-
-                    entry = f"{c_name} ({u_name}) - [{u_country}]"
-                    skill_courses[skill_name].append(entry)
-
-            # Deduplicate
             result = {skill: list(set(courses)) for skill, courses in skill_courses.items()}
 
         except Exception as e:
-            logger.error(f"DB Error in get_courses_from_other_countries: {e}")
+            logger.error(f"DB Error in get_courses_from_other_universities: {e}")
             result = {}
         finally:
             if conn and conn.is_connected():
@@ -243,62 +251,133 @@ class EducationRecommendationSystem:
 
         return result
 
-    def run_analysis(self, skill_threshold: float = 0.7, sector: str = None) -> Dict[str, Any]:
-        occupations = self.load_occupation_titles_from_csv(sector_filter=sector)
+    # ------------------------------------------------------------------
+    # MAIN: Gap analysis per university (+ country aggregate)
+    # ------------------------------------------------------------------
+    def run_analysis(
+        self,
+        occupations: List[str],
+        skill_threshold: float = 0.1,
+        top_n: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Gap analysis με βάση occupations που δίνει ο χρήστης.
 
+        1. Για κάθε occupation -> top_n required skills από το Trig
+           (url + label + importance).
+        2. Union όλων -> distinct required skills (κλειδί: ESCO url).
+        3. Σύγκριση με τα skill_urls ΚΑΘΕ πανεπιστημίου (DB) -> coverage & gap.
+        4. Aggregate ανά χώρα (union coverage + μέσος όρος παν/μίων).
+        """
+        occupations = [o.strip() for o in (occupations or []) if o and o.strip()]
         if not occupations:
-            return {"error": f"No occupations found for sector '{sector}'" if sector else "No occupations found"}
+            return {"error": "No occupations provided"}
 
-        logger.info(f"Loading required skills (threshold={skill_threshold}) for {len(occupations)} occupations...")
-        req_skills = self.get_required_skills(occupations, skill_threshold)
+        logger.info(
+            f"Loading top-{top_n} required skills (threshold={skill_threshold}) "
+            f"for {len(occupations)} user-selected occupations..."
+        )
+        req_skills = self.get_required_skills(occupations, skill_threshold, top_n=top_n)
+
+        if not req_skills:
+            return {"error": "No required skills returned for the selected occupations"}
 
         logger.info("Loading university skills from DB...")
-        country_data = self.get_all_countries_skills()
+        uni_data = self.get_all_universities_skills()
 
-        total_countries = len(country_data)
-        logger.info(f"Starting analysis for {total_countries} countries...")
+        total_unis = len(uni_data)
+        logger.info(f"Starting analysis for {total_unis} universities...")
 
-        # Υπολόγισε το all_req_set μία φορά (όχι μέσα στο loop)
-        all_req_list = []
-        for s_list in req_skills.values():
-            all_req_list.extend(s_list)
-        all_req_set = set(all_req_list)
+        # ---- Union όλων των top-N skills -> distinct required set (by URL) ----
+        # url -> label (για ευανάγνωστο output)
+        url_to_label: Dict[str, str] = {}
+        for skills in req_skills.values():
+            for sk in skills:
+                url_to_label[sk["url"]] = sk["label"] or sk["url"]
 
-        logger.info(f"Total unique required skills across all occupations: {len(all_req_set)}")
+        all_req_urls = set(url_to_label.keys())
+        total_needed = len(all_req_urls)
 
-        final_results = {}
+        logger.info(
+            f"Total unique required skills (union of top-{top_n} across "
+            f"{len(req_skills)} occupations): {total_needed}"
+        )
 
-        for idx, (country, c_skills) in enumerate(country_data.items(), start=1):
-            logger.info(f"[{idx}/{total_countries}] Analyzing country: {country}")
+        university_results = {}
+        country_present = defaultdict(set)     # union present urls ανά χώρα
+        country_scores = defaultdict(list)     # coverage κάθε παν/μίου ανά χώρα
 
-            c_skills_set = set(c_skills)
+        for idx, (uni, data) in enumerate(uni_data.items(), start=1):
+            country = data["country"]
+            uni_urls = data["skill_urls"]
 
-            # Coverage Score
-            present_skills = all_req_set.intersection(c_skills_set)
-            total_needed = len(all_req_set)
-            coverage_score = round((len(present_skills) / total_needed) * 100, 2) if total_needed > 0 else 0.0
+            present_urls = all_req_urls.intersection(uni_urls)
+            coverage_score = round((len(present_urls) / total_needed) * 100, 2) if total_needed > 0 else 0.0
+            missing_urls = all_req_urls - uni_urls
 
-            missing = all_req_set - c_skills_set
-
-            # Missing departments ανά occupation
-            missing_depts = {}
+            # missing skills ανά occupation (με labels)
+            missing_by_occ = {}
             for occ, skills in req_skills.items():
-                inter = set(skills).intersection(missing)
-                if inter:
-                    missing_depts[occ] = list(inter)
+                occ_missing = [sk["label"] for sk in skills if sk["url"] in missing_urls]
+                if occ_missing:
+                    missing_by_occ[occ] = sorted(set(occ_missing))
 
-            # Missing courses (batch query)
+            # πού διδάσκονται τα missing skills (άλλα παν/μια) — matching με url
             missing_courses = {}
-            if missing:
-                missing_courses = self.get_courses_from_other_countries(list(missing), country)
+            if missing_urls:
+                missing_courses = self.get_courses_from_other_universities(
+                    list(missing_urls), uni
+                )
 
-            final_results[country] = {
+            university_results[uni] = {
+                "country": country,
                 "coverage_score": coverage_score,
-                "missing_departments": missing_depts,
+                "present_skills_count": len(present_urls),
+                "missing_skills_count": len(missing_urls),
+                "present_skills": sorted({url_to_label[u] for u in present_urls}),
+                "missing_departments": missing_by_occ,
                 "missing_courses": missing_courses
             }
 
-            logger.info(f"  ✅ {country}: coverage={coverage_score}%, missing_skills={len(missing)}, missing_courses_found={len(missing_courses)}")
+            # aggregate ανά χώρα
+            country_present[country].update(present_urls)
+            country_scores[country].append(coverage_score)
 
-        logger.info(f"🎉 Analysis complete for all {total_countries} countries.")
-        return final_results
+            logger.info(
+                f"[{idx}/{total_unis}] {uni} ({country}): "
+                f"coverage={coverage_score}%, missing={len(missing_urls)}"
+            )
+
+        # ---- Country-level aggregate ----
+        country_results = {}
+        for country, present_set in country_present.items():
+            union_coverage = round((len(present_set) / total_needed) * 100, 2) if total_needed > 0 else 0.0
+            scores = country_scores[country]
+            avg_coverage = round(sum(scores) / len(scores), 2) if scores else 0.0
+            country_results[country] = {
+                "union_coverage_score": union_coverage,    # τι καλύπτει η χώρα κάπου
+                "avg_university_coverage": avg_coverage,   # μέση κάλυψη ανά παν/μιο
+                "universities_count": len(scores)
+            }
+
+        logger.info(
+            f"🎉 Analysis complete: {total_unis} universities, "
+            f"{len(country_results)} countries."
+        )
+
+        # required_skills_per_occupation ως labels (για ευανάγνωστο output)
+        req_skills_labels = {
+            occ: [sk["label"] for sk in skills]
+            for occ, skills in req_skills.items()
+        }
+
+        return {
+            "selected_occupations": occupations,
+            "occupations_with_skills": list(req_skills.keys()),
+            "top_n": top_n,
+            "threshold": skill_threshold,
+            "total_unique_required_skills": total_needed,
+            "required_skills_per_occupation": req_skills_labels,
+            "universities": university_results,
+            "countries": country_results
+        }

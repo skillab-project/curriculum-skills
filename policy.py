@@ -1,8 +1,12 @@
 import os
+import uuid
 import logging
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Query
+from typing import List
+
+from fastapi import APIRouter, Depends, BackgroundTasks, Query, Body
 from sqlalchemy.orm import Session, declarative_base, sessionmaker, scoped_session
 from sqlalchemy import Column, Integer, String, JSON, TIMESTAMP, Float, text, create_engine
+from pydantic import BaseModel, Field
 
 from policy_engine import EducationRecommendationSystem
 
@@ -21,6 +25,7 @@ DB_URL = (
 engine = create_engine(DB_URL, echo=False, pool_pre_ping=True)
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 
+
 def get_db():
     db = SessionLocal()
     try:
@@ -28,22 +33,15 @@ def get_db():
     finally:
         db.close()
 
+
 # ==========================================
 SERVICE2_URL = os.getenv(
     "REQUIRED_SKILLS_SERVICE_URL",
     "https://portal.skillab-project.eu/required-skills"
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(BASE_DIR, "data", "New_occupation_table.csv")
-
-if not os.path.exists(CSV_PATH):
-    logger.warning(f"⚠️ CSV file NOT found at: {CSV_PATH}")
-else:
-    logger.info(f"✅ CSV file found at: {CSV_PATH}")
-
 # ==========================================
-# MYSQL MODEL
+# MYSQL MODEL — ανά πανεπιστήμιο, με run_id ανά ανάλυση
 # ==========================================
 BasePolicy = declarative_base()
 
@@ -51,68 +49,104 @@ BasePolicy = declarative_base()
 class PolicyRecommendation(BasePolicy):
     __tablename__ = "policy_recommendations"
     id = Column(Integer, primary_key=True, index=True)
-    country = Column(String(100), nullable=False, index=True)
+    run_id = Column(String(36), nullable=False, index=True)         # μοναδικό ανά ανάλυση
+    university_name = Column(String(255), nullable=False, index=True)
+    country = Column(String(100), nullable=True, index=True)
     coverage_score = Column(Float, nullable=True)
+    present_skills_count = Column(Integer, nullable=True)
+    missing_skills_count = Column(Integer, nullable=True)
     missing_departments = Column(JSON, nullable=True)
     missing_courses = Column(JSON, nullable=True)
-    # Αποθηκεύουμε και τις παραμέτρους της ανάλυσης για φιλτράρισμα αργότερα
+    # Παράμετροι ανάλυσης
     threshold = Column(Float, nullable=True)
-    sector = Column(String(255), nullable=True)
+    top_n = Column(Integer, nullable=True)
+    occupations = Column(JSON, nullable=True)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+
+
+# ==========================================
+# REQUEST SCHEMA
+# ==========================================
+class PolicyAnalyzeRequest(BaseModel):
+    occupations: List[str] = Field(
+        ...,
+        min_items=1,
+        description="Λίστα occupations που επέλεξε ο χρήστης.",
+        example=["Data Scientist", "Software Developer", "Cybersecurity Analyst"]
+    )
+    threshold: float = Field(
+        0.7, ge=0.0, le=1.0,
+        description="Ελάχιστο Value threshold ανά skill."
+    )
+    top_n: int = Field(
+        100, ge=1, le=500,
+        description="Μέγιστος αριθμός skills ανά occupation (π.χ. top 100)."
+    )
+
+
+# ==========================================
+# SAVE HELPER
+# ==========================================
+def _save_results_to_db(db: Session, results: dict, run_id: str,
+                        occupations: List[str], threshold: float, top_n: int):
+    """
+    Κάθε run είναι νέο (μοναδικό run_id) -> πάντα insert, ποτέ overwrite.
+    """
+    universities = results.get("universities", {})
+    count = 0
+    for uni, data in universities.items():
+        db.add(PolicyRecommendation(
+            run_id=run_id,
+            university_name=uni,
+            country=data.get("country"),
+            coverage_score=data.get("coverage_score", 0.0),
+            present_skills_count=data.get("present_skills_count"),
+            missing_skills_count=data.get("missing_skills_count"),
+            missing_departments=data.get("missing_departments"),
+            missing_courses=data.get("missing_courses"),
+            threshold=threshold,
+            top_n=top_n,
+            occupations=occupations
+        ))
+        count += 1
+    db.commit()
+    logger.info(f"✅ Saved {count} university records for run_id={run_id}.")
+    return count
 
 
 # ==========================================
 # WRAPPERS
 # ==========================================
-def run_policy_analysis_logic(db: Session, threshold: float, sector: str = None):
-    logger.info(f"Starting Education Policy Analysis (Threshold: {threshold}, Sector: {sector or 'ALL'})")
+def run_policy_analysis_logic(db: Session, run_id: str, occupations: List[str],
+                              threshold: float, top_n: int):
+    logger.info(
+        f"Starting Policy Gap Analysis run_id={run_id} "
+        f"(occupations={occupations}, threshold={threshold}, top_n={top_n})"
+    )
 
-    system = EducationRecommendationSystem(SERVICE2_URL, "unused", CSV_PATH)
-    results = system.run_analysis(skill_threshold=threshold, sector=sector)
+    system = EducationRecommendationSystem(SERVICE2_URL)
+    results = system.run_analysis(
+        occupations=occupations,
+        skill_threshold=threshold,
+        top_n=top_n
+    )
 
     if "error" in results:
         logger.error(f"❌ Analysis failed: {results.get('error')}")
         return
 
     try:
-        count = 0
-        for country, data in results.items():
-            # Ψάχνουμε existing record με ίδιο country + threshold + sector
-            existing = db.query(PolicyRecommendation).filter_by(
-                country=country,
-                threshold=threshold,
-                sector=sector
-            ).first()
-
-            cov_score = data.get("coverage_score", 0.0)
-
-            if existing:
-                existing.coverage_score = cov_score
-                existing.missing_departments = data["missing_departments"]
-                existing.missing_courses = data["missing_courses"]
-            else:
-                new_rec = PolicyRecommendation(
-                    country=country,
-                    coverage_score=cov_score,
-                    missing_departments=data["missing_departments"],
-                    missing_courses=data["missing_courses"],
-                    threshold=threshold,
-                    sector=sector
-                )
-                db.add(new_rec)
-            count += 1
-
-        db.commit()
-        logger.info(f"✅ Analysis completed. Saved/Updated {count} country records.")
+        _save_results_to_db(db, results, run_id, occupations, threshold, top_n)
     except Exception as e:
         logger.error(f"❌ Database save error: {e}")
         db.rollback()
 
 
-def background_task_wrapper(threshold: float, sector: str = None):
+def background_task_wrapper(run_id: str, occupations: List[str],
+                            threshold: float, top_n: int):
     db = SessionLocal()
     try:
-        run_policy_analysis_logic(db, threshold, sector)
+        run_policy_analysis_logic(db, run_id, occupations, threshold, top_n)
     finally:
         db.close()
 
@@ -121,76 +155,193 @@ def background_task_wrapper(threshold: float, sector: str = None):
 # ENDPOINTS
 # ==========================================
 
-@router.get("/policy/sectors", summary="View available education sectors")
-def get_sectors(
-    starts_with: str = Query(None, description="Optional: Filter sectors that start with these characters")
-):
-    """
-    Επιστρέφει όλα τα διαθέσιμα sectors.
-    Αν δοθεί η παράμετρος starts_with, επιστρέφει μόνο τα sectors που αρχίζουν με τα συγκεκριμένα γράμματα.
-    """
-    system = EducationRecommendationSystem(SERVICE2_URL, "unused", CSV_PATH)
-    sectors = system.get_available_sectors()
-
-    if starts_with:
-        sectors = [s for s in sectors if s.lower().startswith(starts_with.lower())]
-
-    return {"sectors": sectors, "count": len(sectors)}
-
-
-@router.post("/policy/analyze", summary="Trigger multi-country policy analysis (Background)")
+@router.post("/policy/analyze", summary="Trigger multi-occupation skill-gap analysis (Background)")
 def trigger_analysis(
-        background_tasks: BackgroundTasks,
-        threshold: float = Query(0.7, description="Minimum skill value threshold", ge=0.0, le=1.0),
-        sector: str = Query(None, description="Optional: Filter by sector name"),
-        db: Session = Depends(get_db)
+    payload: PolicyAnalyzeRequest = Body(...),
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
 ):
+    """
+    Δέχεται λίστα occupations, τρέχει gap analysis στο background και
+    επιστρέφει ΑΜΕΣΩΣ ένα run_id. Ο χρήστης κάνει poll στο
+    /policy/status/{run_id} και μετά διαβάζει τα /policy/results?run_id=...
+    """
     try:
         BasePolicy.metadata.create_all(bind=engine)
     except Exception as e:
         logger.error(f"❌ Error creating table: {e}")
 
-    background_tasks.add_task(background_task_wrapper, threshold, sector)
+    run_id = str(uuid.uuid4())
+
+    background_tasks.add_task(
+        background_task_wrapper,
+        run_id,
+        payload.occupations,
+        payload.threshold,
+        payload.top_n
+    )
 
     return {
         "message": "Analysis started in background.",
-        "parameters": {"threshold": threshold, "sector": sector or "ALL"}
+        "run_id": run_id,
+        "parameters": {
+            "occupations": payload.occupations,
+            "threshold": payload.threshold,
+            "top_n": payload.top_n
+        }
     }
 
-@router.get("/policy/results", summary="Get policy recommendations from DB")
+
+@router.post("/policy/analyze_sync", summary="Run analysis (Blocking, returns full result)")
+def trigger_analysis_sync(
+    payload: PolicyAnalyzeRequest = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Ίδια λογική αλλά blocking: τρέχει, αποθηκεύει, και επιστρέφει
+    απευθείας το πλήρες αποτέλεσμα (universities + countries) μαζί
+    με το run_id. Κατάλληλο για δοκιμές ή μικρές λίστες occupations.
+    """
+    try:
+        BasePolicy.metadata.create_all(bind=engine)
+    except Exception as e:
+        logger.error(f"❌ Error creating table: {e}")
+
+    run_id = str(uuid.uuid4())
+
+    system = EducationRecommendationSystem(SERVICE2_URL)
+    results = system.run_analysis(
+        occupations=payload.occupations,
+        skill_threshold=payload.threshold,
+        top_n=payload.top_n
+    )
+
+    if "error" in results:
+        return {"error": results["error"], "run_id": run_id}
+
+    try:
+        _save_results_to_db(db, results, run_id, payload.occupations,
+                            payload.threshold, payload.top_n)
+    except Exception as e:
+        logger.error(f"❌ Database save error: {e}")
+        db.rollback()
+
+    results["run_id"] = run_id
+    return results
+
+
+@router.get("/policy/status/{run_id}", summary="Check if an analysis run has finished")
+def get_run_status(run_id: str, db: Session = Depends(get_db)):
+    """
+    Επιστρέφει αν το background run έχει ολοκληρωθεί (υπάρχουν records)
+    ή είναι ακόμα σε εξέλιξη.
+    """
+    count = db.query(PolicyRecommendation).filter_by(run_id=run_id).count()
+    return {
+        "run_id": run_id,
+        "status": "completed" if count > 0 else "pending",
+        "universities_analyzed": count
+    }
+
+
+@router.get("/policy/runs", summary="List all analysis runs with their occupations")
+def list_runs(db: Session = Depends(get_db)):
+    """
+    Επιστρέφει όλες τις αναλύσεις που έχουν τρέξει (ανά run_id),
+    ώστε ο χρήστης να ξέρει ποιο run αντιστοιχεί σε ποια occupations.
+    """
+    # Ένα record ανά run_id αρκεί για τα metadata (occupations/params είναι ίδια)
+    rows = (
+        db.query(PolicyRecommendation)
+        .order_by(PolicyRecommendation.created_at.desc())
+        .all()
+    )
+
+    seen = {}
+    for r in rows:
+        if r.run_id not in seen:
+            seen[r.run_id] = {
+                "run_id": r.run_id,
+                "occupations": r.occupations,
+                "threshold": r.threshold,
+                "top_n": r.top_n,
+                "created_at": r.created_at,
+                "universities_count": 0
+            }
+        seen[r.run_id]["universities_count"] += 1
+
+    return {"runs": list(seen.values())}
+
+
+@router.get("/policy/results", summary="Get per-university recommendations for a run")
 def get_results(
     db: Session = Depends(get_db),
-    threshold: float = Query(None, description="Optional: Filter by threshold used in analysis", ge=0.0, le=1.0),
-    sector: str = Query(None, description="Optional: Filter by sector used in analysis"),
+    run_id: str = Query(None, description="Filter by a specific analysis run"),
     country: str = Query(None, description="Optional: Filter by country name"),
-    limit: int = Query(None, description="Optional: Max number of results to return", ge=1, le=1000)
+    university: str = Query(None, description="Optional: Filter by university name"),
+    limit: int = Query(None, ge=1, le=1000)
 ):
+    """
+    Coverage/gap ανά πανεπιστήμιο. Δώσε run_id για να πάρεις τα
+    αποτελέσματα μιας συγκεκριμένης ανάλυσης (search coverage by Universities).
+    """
     try:
-        id_query = db.query(PolicyRecommendation.id, PolicyRecommendation.coverage_score)
+        q = db.query(PolicyRecommendation)
 
-        if threshold is not None:
-            id_query = id_query.filter(
-                PolicyRecommendation.threshold.between(threshold - 0.001, threshold + 0.001)
-            )
-        if sector is not None:
-            id_query = id_query.filter(PolicyRecommendation.sector == sector)
+        if run_id is not None:
+            q = q.filter(PolicyRecommendation.run_id == run_id)
         if country is not None:
-            id_query = id_query.filter(PolicyRecommendation.country.ilike(f"%{country}%"))
+            q = q.filter(PolicyRecommendation.country.ilike(f"%{country}%"))
+        if university is not None:
+            q = q.filter(PolicyRecommendation.university_name.ilike(f"%{university}%"))
 
-        q = id_query.order_by(PolicyRecommendation.coverage_score.desc())
+        q = q.order_by(PolicyRecommendation.coverage_score.desc())
         if limit is not None:
             q = q.limit(limit)
-        top_ids = [row.id for row in q.all()]
 
-        if not top_ids:
+        results = q.all()
+        if not results:
+            return {"message": "No results found for the given filters.", "data": []}
+        return results
+
+    except Exception as e:
+        return {"message": "No results yet or table missing.", "error": str(e)}
+
+
+@router.get("/policy/results/by_country", summary="Aggregate coverage per country for a run")
+def get_results_by_country(
+    db: Session = Depends(get_db),
+    run_id: str = Query(None, description="Filter by a specific analysis run")
+):
+    """
+    Συγκεντρωτικό coverage ανά χώρα, υπολογισμένο από τα per-university
+    records ενός run: μέσος όρος coverage και πλήθος πανεπιστημίων.
+    """
+    try:
+        q = db.query(PolicyRecommendation)
+        if run_id is not None:
+            q = q.filter(PolicyRecommendation.run_id == run_id)
+
+        rows = q.all()
+        if not rows:
             return {"message": "No results found for the given filters.", "data": []}
 
-        results = db.query(PolicyRecommendation).filter(
-            PolicyRecommendation.id.in_(top_ids)
-        ).all()
+        agg = {}
+        for r in rows:
+            c = r.country or "Unknown"
+            agg.setdefault(c, [])
+            agg[c].append(r.coverage_score or 0.0)
 
-        results.sort(key=lambda r: r.coverage_score or 0, reverse=True)
-        return results
+        data = [
+            {
+                "country": c,
+                "avg_university_coverage": round(sum(scores) / len(scores), 2) if scores else 0.0,
+                "universities_count": len(scores)
+            }
+            for c, scores in agg.items()
+        ]
+        data.sort(key=lambda x: x["avg_university_coverage"], reverse=True)
+        return {"data": data}
 
     except Exception as e:
         return {"message": "No results yet or table missing.", "error": str(e)}
