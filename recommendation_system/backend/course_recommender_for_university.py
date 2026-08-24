@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sqlalchemy.orm import Session
-from recommendation_system.backend.models import University, Course
+from recommendation_system.backend.models import University, Course, DegreeProgram
 import json
 import re
 import logging
@@ -196,6 +196,81 @@ class CourseRecommender:
 
         return profiles
 
+    def _degree_type_from_text(self, *texts) -> str:
+        low = " ".join((t or "") for t in texts).lower()
+        if any(x in low for x in ["master", "msc", "m.sc", "ma"]):
+            return "MSc/MA"
+        if any(x in low for x in ["bachelor", "bsc", "b.sc", "ba"]):
+            return "BSc/BA"
+        return "Other"
+
+    def build_program_profile(self, univ_id: int, program_id: int) -> Optional[Dict[str, Any]]:
+        """Build a degree profile for one DegreeProgram, from its linked courses.
+
+        Unlike build_degree_profiles (which groups by Course.degree_titles and has
+        no real program_id), this keys off the actual DegreeProgram row and its
+        courses, so it works for programs created via PDF upload.
+        """
+        program = (
+            self.db.query(DegreeProgram)
+            .filter_by(program_id=program_id, university_id=univ_id)
+            .first()
+        )
+        if not program:
+            return None
+
+        titles = self._parse_titles(getattr(program, "degree_titles", None))
+        degree_title = titles[0] if titles else ""
+
+        skills, courses = set(), set()
+        for course in getattr(program, "courses", []) or []:
+            lesson_name = (getattr(course, "lesson_name", "") or "").strip()
+            if lesson_name:
+                courses.add(lesson_name)
+            for cs in getattr(course, "skills", []) or []:
+                if getattr(cs, "skill", None):
+                    skill_name = (cs.skill.skill_name or "").strip()
+                    if skill_name:
+                        skills.add(skill_name)
+
+        return {
+            "university_id": univ_id,
+            "program_id": program_id,
+            "degree_title": degree_title,
+            "degree_type": self._degree_type_from_text(degree_title, getattr(program, "degree_type", "")),
+            "skills": sorted(skills),
+            "courses": sorted(courses),
+        }
+
+    def build_university_candidate_profile(self, univ_id: int) -> Optional[Dict[str, Any]]:
+        """A whole-university profile (all its courses + skills) usable as a
+        recommendation candidate — so courses that aren't attached to a degree
+        program can still be recommended to other universities.
+        """
+        university = self.get_university(univ_id)
+        if not university:
+            return None
+        skills, courses = set(), set()
+        for course in getattr(university, "courses", []) or []:
+            lesson_name = (getattr(course, "lesson_name", "") or "").strip()
+            if lesson_name:
+                courses.add(lesson_name)
+            for cs in getattr(course, "skills", []) or []:
+                if getattr(cs, "skill", None):
+                    skill_name = (cs.skill.skill_name or "").strip()
+                    if skill_name:
+                        skills.add(skill_name)
+        if not courses:
+            return None
+        return {
+            "university_id": univ_id,
+            "program_id": -1,
+            "degree_title": getattr(university, "university_name", "") or "",
+            "degree_type": "Any",
+            "skills": sorted(skills),
+            "courses": sorted(courses),
+        }
+
     # ==========================================================
     # 2) Find similar degrees
     # ==========================================================
@@ -226,12 +301,19 @@ class CourseRecommender:
             (target_profile.get("courses") or [])
         ).strip()
 
-        # Filter raw candidates by degree_type and not from the same university
-        raw_candidates = [
+        # Candidates must be from a different university. Prefer the same
+        # degree_type (or the type-agnostic "Any" whole-university candidates),
+        # but fall back to all other-university candidates when that preference
+        # would leave nothing (e.g. sparse data with few real degree programs).
+        other_univ = [
             p for p in all_profiles
-            if (p.get("degree_type") or "").strip() == degree_type
-            and p.get("university_id") != target_profile.get("university_id")
+            if p.get("university_id") != target_profile.get("university_id")
         ]
+        typed = [
+            p for p in other_univ
+            if (p.get("degree_type") or "").strip() in (degree_type, "Any")
+        ]
+        raw_candidates = typed if typed else other_univ
 
         cand_objs, cand_texts = [], []
         for p in raw_candidates:
@@ -367,8 +449,9 @@ class CourseRecommender:
                 ), 3
             )
 
-            # Fetch textual course details, restricting to the target university (so the description is relevant)
-            course_details = self.get_course_details_by_name(cname, target_univ_id)
+            # Fetch textual course details from wherever the course exists
+            # (the candidate courses come from *other* universities).
+            course_details = self.get_course_details_by_name(cname)
 
             results.append({
                 "course_name": cname,

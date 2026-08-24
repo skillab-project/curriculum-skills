@@ -743,6 +743,9 @@ def write_json_to_database(data: Dict[str, Any], db_config: Dict[str, Any]) -> D
             for p_idx, dp in enumerate(degree_programs):
                 if not isinstance(dp, dict):
                     continue
+                # Capture the program's courses BEFORE sanitizing: _sanitize_program_for_db
+                # returns a new dict without the "courses" key.
+                dp_courses = dp.get("courses") or []
                 cur.execute("SAVEPOINT sp_program")
                 try:
                     dp = _sanitize_program_for_db(dp)
@@ -768,7 +771,6 @@ def write_json_to_database(data: Dict[str, Any], db_config: Dict[str, Any]) -> D
                     })
                     continue
 
-                dp_courses = dp.get("courses") or []
                 if isinstance(dp_courses, list):
                     for c_idx, course in enumerate(dp_courses):
                         if not isinstance(course, dict):
@@ -876,6 +878,210 @@ def write_json_to_database(data: Dict[str, Any], db_config: Dict[str, Any]) -> D
         except Exception:
             pass
 
+
+
+def delete_course_by_id(course_id: int, db_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete a single Course by its id.
+
+    CourseSkill rows are removed automatically via the ON DELETE CASCADE foreign
+    key. Returns how many rows were removed and whether the course existed.
+    """
+    conn = mysql.connector.connect(**db_config)
+    conn.autocommit = False
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM Course WHERE course_id = %s", (course_id,))
+        deleted = int(cur.rowcount)
+        conn.commit()
+        return {
+            "course_id": course_id,
+            "found": deleted > 0,
+            "deleted_courses": deleted,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+
+def delete_program_by_id(program_id: int, db_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete a single DegreeProgram by its id, along with the courses under it.
+
+    The program's courses are deleted first (each cascades to its CourseSkill
+    rows), then the program itself. Returns the counts removed and whether the
+    program existed.
+    """
+    conn = mysql.connector.connect(**db_config)
+    conn.autocommit = False
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM Course WHERE program_id = %s", (program_id,))
+        deleted_courses = int(cur.rowcount)
+        cur.execute("DELETE FROM DegreeProgram WHERE program_id = %s", (program_id,))
+        deleted_programs = int(cur.rowcount)
+        conn.commit()
+        return {
+            "program_id": program_id,
+            "found": deleted_programs > 0,
+            "deleted_programs": deleted_programs,
+            "deleted_courses": deleted_courses,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+
+def list_universities(db_config: Dict[str, Any], country: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return universities that have saved curriculum data, with per-university counts."""
+    conn = mysql.connector.connect(**db_config)
+    try:
+        cur = conn.cursor(dictionary=True)
+        params: Tuple[Any, ...] = ()
+        where = ""
+        if country:
+            where = "WHERE LOWER(u.country) LIKE LOWER(%s)"
+            params = (f"%{country}%",)
+        cur.execute(
+            f"""
+            SELECT
+                u.university_id,
+                u.university_name,
+                u.country,
+                (SELECT COUNT(*) FROM DegreeProgram p WHERE p.university_id = u.university_id) AS program_count,
+                (SELECT COUNT(*) FROM Course c WHERE c.university_id = u.university_id) AS course_count
+            FROM University u
+            {where}
+            ORDER BY u.university_name
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _parse_json_maybe(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def get_university_curriculum(university_id: int, db_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return one university's saved programs and courses, each with its DB id.
+
+    Shape:
+        {
+          "university": {university_id, university_name, country},
+          "program_count": int, "course_count": int,
+          "programs": [ {program_id, degree_type, degree_titles, language,
+                         created_at, courses: [course...] }, ... ],
+          "unassigned_courses": [ course... ]   # courses with no program_id
+        }
+    Each course: {course_id, program_id, lesson_name, language, website,
+                  semester_label, ects_list, description, created_at, skills:[names]}.
+    Returns None if the university id does not exist.
+    """
+    conn = mysql.connector.connect(**db_config)
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        cur.execute(
+            "SELECT university_id, university_name, country FROM University WHERE university_id = %s",
+            (university_id,),
+        )
+        university = cur.fetchone()
+        if not university:
+            cur.close()
+            return None
+
+        cur.execute(
+            """
+            SELECT program_id, degree_type, degree_titles, language,
+                   duration_semesters, total_ects, CAST(created_at AS CHAR) AS created_at
+            FROM DegreeProgram
+            WHERE university_id = %s
+            ORDER BY program_id
+            """,
+            (university_id,),
+        )
+        programs = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT course_id, program_id, lesson_name, language, website,
+                   semester_label, ects_list, description, CAST(created_at AS CHAR) AS created_at
+            FROM Course
+            WHERE university_id = %s
+            ORDER BY course_id
+            """,
+            (university_id,),
+        )
+        courses = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT cs.course_id, s.skill_name
+            FROM CourseSkill cs
+            JOIN Skill s ON s.skill_id = cs.skill_id
+            JOIN Course c ON c.course_id = cs.course_id
+            WHERE c.university_id = %s
+            """,
+            (university_id,),
+        )
+        skill_rows = cur.fetchall()
+        cur.close()
+
+        skills_by_course: DefaultDict[int, List[str]] = defaultdict(list)
+        for r in skill_rows:
+            skills_by_course[r["course_id"]].append(r["skill_name"])
+
+        for p in programs:
+            p["degree_titles"] = _parse_json_maybe(p.get("degree_titles"))
+
+        for c in courses:
+            c["ects_list"] = _parse_json_maybe(c.get("ects_list"))
+            c["skills"] = sorted(set(skills_by_course.get(c["course_id"], [])))
+
+        courses_by_program: DefaultDict[Optional[int], List[Dict[str, Any]]] = defaultdict(list)
+        for c in courses:
+            courses_by_program[c.get("program_id")].append(c)
+
+        for p in programs:
+            p["courses"] = courses_by_program.get(p["program_id"], [])
+
+        return {
+            "university": university,
+            "program_count": len(programs),
+            "course_count": len(courses),
+            "programs": programs,
+            "unassigned_courses": courses_by_program.get(None, []),
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def write_json_file_to_database(json_path: str, db_config: Dict[str, Any]) -> Dict[str, Any]:

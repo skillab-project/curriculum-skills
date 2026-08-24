@@ -7,6 +7,8 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from rapidfuzz import fuzz
 
+from llm_client import chat_generate
+
 def deduplicate_titles(titles: list[str], threshold: int = 95) -> list[str]:
     """
     Remove near-duplicate degree titles using fuzzy matching.
@@ -67,15 +69,6 @@ def _lazy_openai_client():
         print("Please install openai: pip install openai", file=sys.stderr)
         raise
     return OpenAI()
-
-def _lazy_requests():
-    try:
-        import requests
-    except Exception:
-        print("Please install requests: pip install requests", file=sys.stderr)
-        raise
-    return requests
-
 
 # =========================
 # Prompt + Parsing
@@ -156,24 +149,24 @@ def call_openai(model: str, system_msg: str, user_msg: str, temperature: float =
             backoff *= 2
 
 
-def call_ollama(model: str, user_msg: str, system_msg: Optional[str] = None, max_retries: int = 4) -> str:
-    requests = _lazy_requests()
-    url = "http://localhost:11434/api/generate"
-    prompt = (system_msg + "\n\n" if system_msg else "") + user_msg
-    body = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.0},
-    }
+def call_mistral(model: Optional[str], user_msg: str, system_msg: Optional[str] = None, max_retries: int = 4) -> str:
+    """Call the configured Mistral chat-completions backend (API_URL / MODEL_NAME).
+
+    Uses the shared llm_client, so it targets the same token-protected OpenWebUI
+    URL in deployment and the local Mistral (Ollama's /v1 endpoint) in
+    development. No hardcoded host or model.
+    """
     backoff = 1.0
     for attempt in range(max_retries):
         try:
-            r = requests.post(url, json=body, timeout=180)
-            r.raise_for_status()
-            j = r.json()
-            return (j.get("response") or "").strip()
-        except Exception as e:
+            return chat_generate(
+                user_msg,
+                model=model,
+                system=system_msg,
+                temperature=0.0,
+                json_mode=True,
+            ).strip()
+        except Exception:
             if attempt == max_retries - 1:
                 raise
             time.sleep(backoff)
@@ -274,8 +267,8 @@ def llm_validate_titles_any(
     try:
         if backend == "openai":
             raw = call_openai(model=model, system_msg=SYSTEM_MSG, user_msg=user_msg, temperature=0.0)
-        elif backend == "ollama":
-            raw = call_ollama(model=model, user_msg=user_msg, system_msg=SYSTEM_MSG)
+        elif backend == "mistral":
+            raw = call_mistral(model=model, user_msg=user_msg, system_msg=SYSTEM_MSG)
         else:
             raise ValueError("Unsupported backend")
         parsed = parse_llm_json(raw)
@@ -375,8 +368,8 @@ def iter_json_files(folder: str) -> List[str]:
 def main():
     p = argparse.ArgumentParser(description="Validate and clean degree_titles using an LLM (accept ANY degree type).")
     p.add_argument("--folder", required=True, help="Folder containing JSON files.")
-    p.add_argument("--backend", choices=["openai", "ollama"], default="openai", help="LLM backend to use.")
-    p.add_argument("--model", default=None, help="Model name (default: openai=gpt-4o-mini, ollama=llama3.1)")
+    p.add_argument("--backend", choices=["openai", "mistral"], default="openai", help="LLM backend to use.")
+    p.add_argument("--model", default=None, help="Model name (default: openai=gpt-4o-mini, mistral=mistral:latest)")
     p.add_argument("--inplace", action="store_true", help="Write changes in-place (overwrite files).")
     p.add_argument("--outdir", default=None, help="Write cleaned JSON to this folder (ignored if --inplace).")
     p.add_argument("--dry-run", action="store_true", help="Run without writing files.")
@@ -384,7 +377,7 @@ def main():
 
     folder = args.folder
     backend = args.backend
-    model = args.model or ("gpt-4o-mini" if backend == "openai" else "llama3.1")
+    model = args.model or ("gpt-4o-mini" if backend == "openai" else "mistral:latest")
 
     if not os.path.isdir(folder):
         print(f"Folder not found: {folder}", file=sys.stderr)

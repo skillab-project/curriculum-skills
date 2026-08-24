@@ -690,20 +690,25 @@ def recommend_courses_for_existing_degree(
     db: Session = Depends(get_db)
 ):
     recommender = CourseRecommenderV2(db)
-    profiles = recommender.build_degree_profiles(univ_id)
 
-    target = None
-    for p in profiles:
-        if p["program_id"] == program_id:
-            target = p
-            break
-
+    # Build the target profile from the actual DegreeProgram (and its linked
+    # courses) rather than by matching a program_id inside build_degree_profiles,
+    # which groups by Course.degree_titles and never carries a real program_id.
+    target = recommender.build_program_profile(univ_id, program_id)
     if not target:
         raise HTTPException(status_code=404, detail="Degree profile not found.")
 
+    # Candidate pool: other universities' degree profiles PLUS a whole-university
+    # candidate each, so courses not attached to a degree program can still be
+    # recommended. The target university itself is excluded.
     all_profiles = []
     for u in recommender.get_all_universities():
+        if u.university_id == univ_id:
+            continue
         all_profiles.extend(recommender.build_degree_profiles(u.university_id))
+        cand = recommender.build_university_candidate_profile(u.university_id)
+        if cand:
+            all_profiles.append(cand)
 
     similar = recommender.find_similar_degrees(target, all_profiles, top_n=10)
 

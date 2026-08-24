@@ -121,6 +121,10 @@ from database import (
     upsert_skill_and_link_with_categories,
     is_database_connected,
     write_json_to_database,
+    delete_course_by_id,
+    delete_program_by_id,
+    list_universities,
+    get_university_curriculum,
     _labels_to_course,
     _normalize_text_for_ner,
     _norm_text,
@@ -158,6 +162,8 @@ from output import (
     _load_universities
 )
 from config import DB_CONFIG
+from llm_client import chat_generate
+import skill_extraction
 
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
@@ -185,21 +191,13 @@ globals()["TASKS"] = TASKS
 load_dotenv()
 
 # -----------------------------------------------------------------------------
-# NVIDIA / Ollama / throughput configuration
+# Throughput configuration
 # -----------------------------------------------------------------------------
-# For best results, set these in your shell/systemd service before starting
-# Ollama/FastAPI. Ollama reads GPU settings when its server starts.
-os.environ.setdefault("OLLAMA_HOST", "http://127.0.0.1:11434")
-os.environ.setdefault("OLLAMA_NUM_GPU", "999")
-os.environ.setdefault("OLLAMA_NUM_PARALLEL", "4")
-os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
-os.environ.setdefault("OLLAMA_FLASH_ATTN", "1")
-
 PDF_CPU_WORKERS = int(os.getenv("PDF_CPU_WORKERS", str(max(2, min(8, os.cpu_count() or 4)))))
 CURRICUNLP_WORKERS = int(os.getenv("CURRICUNLP_WORKERS", "2"))
 CURRICUNLP_MAX_CHUNKS = int(os.getenv("CURRICUNLP_MAX_CHUNKS", "128"))
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "180"))
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+# Cap on concurrent LLM calls (used when cleaning many files in parallel).
+LLM_NUM_PARALLEL = int(os.getenv("LLM_NUM_PARALLEL", "4"))
 
 from recommendation_system.backend.routers.electives import router as electives_router
 from recommendation_system.backend.routers.filters import router as filters_router
@@ -315,23 +313,26 @@ def _extract_json_array(raw: str) -> List[Dict[str, Any]]:
 
     return []
 
-def _ollama_generate(prompt: str, model: Optional[str] = None, temperature: float = 0.0) -> str:
-    base = (os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
-    payload = {
-        "model": model or OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": temperature},
-    }
-    r = _http_session.post(f"{base}/api/generate", json=payload, timeout=OLLAMA_TIMEOUT)
-    r.raise_for_status()
-    return (r.json() or {}).get("response", "")
+def _llm_generate(
+    prompt: str,
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    json_mode: bool = False,
+) -> str:
+    """Generate text from the configured Mistral chat-completions backend.
 
-def _ollama_tags() -> Dict[str, Any]:
-    base = (os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
-    r = _http_session.get(f"{base}/api/tags", timeout=10)
-    r.raise_for_status()
-    return r.json()
+    Configured via API_URL / API_TOKEN / MODEL_NAME, matching the
+    future-technology-trends-identifier setup: a token-protected OpenWebUI URL
+    for the deployment and a local Mistral (Ollama's /v1 endpoint) for
+    development.
+    """
+    return chat_generate(
+        prompt,
+        model=model,
+        temperature=temperature,
+        json_mode=json_mode,
+        session=_http_session,
+    )
 
 try:
     CURRICU_CLIENT = Client("marfoli/CurricuNLP")
@@ -986,12 +987,12 @@ class SaveLabelsRequest(BaseModel):
 
 class CleanRequest(BaseModel):
     folder: str = Field(..., description="Folder containing JSON files with degree_titles")
-    backend: str = Field("openai", description="LLM backend: openai or ollama")
-    model: Optional[str] = Field(None, description="Model name (default: gpt-4o-mini for OpenAI, llama3.1 for Ollama)")
+    backend: str = Field("openai", description="LLM backend: openai or mistral")
+    model: Optional[str] = Field(None, description="Model name (default: gpt-4o-mini for OpenAI, mistral:latest for Mistral)")
     inplace: bool = Field(False, description="Overwrite files in-place")
     outdir: Optional[str] = Field(None, description="Output directory if not inplace (default: <folder>/_cleaned)")
     dry_run: bool = Field(False, description="Run without writing files")
-    workers: Optional[int] = Field(None, description="Parallel file cleaners. For Ollama keep this close to OLLAMA_NUM_PARALLEL.")
+    workers: Optional[int] = Field(None, description="Parallel file cleaners. For the Mistral backend keep this close to LLM_NUM_PARALLEL.")
 
     class Config:
         schema_extra = {
@@ -1010,11 +1011,11 @@ class CleanRequest(BaseModel):
                 },
                 "inplace": {
                     "summary": "Overwrite files in-place",
-                    "description": "Uses Ollama llama3.1 and writes directly into the source folder.",
+                    "description": "Uses the Mistral backend and writes directly into the source folder.",
                     "value": {
                         "folder": "crawler_json",
-                        "backend": "ollama",
-                        "model": "llama3.1",
+                        "backend": "mistral",
+                        "model": "mistral:latest",
                         "inplace": True,
                         "dry_run": False
                     }
@@ -1165,8 +1166,8 @@ class PDFProcessingRequest(BaseModel):
     chunk_size: int = 2000
     overlap: int = 150
     workers: Optional[int] = None
-    use_ollama_summary: bool = False
-    ollama_model: Optional[str] = None
+    use_llm_summary: bool = False
+    llm_model: Optional[str] = None
 
 
 class SkillSearchRequest(BaseModel):
@@ -1410,7 +1411,7 @@ def get_tracker_token() -> str:
         return ""
 
 
-def _save_payload_task(task_id: str, payload: dict):
+def _save_payload_task(task_id: str, payload: dict, extract_skills: bool = False):
     task = TASKS.get(task_id)
     if not task:
         return
@@ -1427,6 +1428,21 @@ def _save_payload_task(task_id: str, payload: dict):
             "saved_courses": len(payload.get("courses", []))
         })
         logger.info("[%s] Done", task_id)
+
+        # Same-step skill extraction: run ESCO skill extraction for exactly the
+        # courses this upload just created. Best-effort — never fails the save.
+        if extract_skills:
+            created_ids = (result or {}).get("created_course_ids") or []
+            if created_ids:
+                task.update({"status": "extracting_skills", "phase": "extracting_skills"})
+                logger.info("[%s] Extracting skills for %d newly saved course(s)", task_id, len(created_ids))
+                skills_summary = _extract_skills_for_course_ids(created_ids)
+                task.update({
+                    "status": "succeeded",
+                    "finished_at": time.time(),
+                    "skills_extraction": skills_summary,
+                })
+                logger.info("[%s] Skill extraction done: %s", task_id, skills_summary)
     except Exception as e:
         task.update({"status": "failed", "finished_at": time.time(), "error": str(e)})
         logger.exception("[%s] Ingest failed: %s", task_id, e)
@@ -1435,6 +1451,87 @@ def _save_payload_task(task_id: str, payload: dict):
 @app.get("/health", tags=["Meta"])
 def health_check():
     return {"status": "running"}
+
+
+@app.get("/skills/esco_status", tags=["Skills"], summary="Load/check the local ESCO skill matcher")
+def esco_status():
+    """Warm and report the local (LLM + SBERT) ESCO skill extractor.
+
+    First call may take a few minutes while the SBERT model downloads and the
+    ESCO embeddings are built; results are cached to disk afterwards.
+    """
+    try:
+        return skill_extraction.warm()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"ESCO matcher not available: {e}")
+
+
+@app.get(
+    "/universities",
+    tags=["PDF", "Courses"],
+    summary="List universities that have saved curriculum data (with counts)",
+)
+def get_universities(country: Optional[str] = Query(None, description="Optional country filter (substring match)")):
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        rows = list_universities(DB_CONFIG, country)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to list universities: {e}")
+    return JSONResponse(content=_json_safe({"universities": rows}))
+
+
+@app.get(
+    "/university/{university_id}/curriculum",
+    tags=["PDF", "Courses"],
+    summary="List a university's saved programs and courses, each with its id",
+)
+def university_curriculum(university_id: int):
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        data = get_university_curriculum(university_id, DB_CONFIG)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to load curriculum: {e}")
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"University {university_id} not found.")
+    return JSONResponse(content=_json_safe(data))
+
+
+@app.delete(
+    "/course/{course_id}",
+    tags=["PDF", "Courses"],
+    summary="Delete a single uploaded course by its id",
+)
+def delete_course(course_id: int):
+    """Delete one Course by id. Its skill links (CourseSkill) are removed too."""
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        result = delete_course_by_id(course_id, DB_CONFIG)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to delete course: {e}")
+    if not result.get("found"):
+        raise HTTPException(status_code=404, detail=f"Course {course_id} not found.")
+    return JSONResponse(content=result)
+
+
+@app.delete(
+    "/program/{program_id}",
+    tags=["PDF", "Courses"],
+    summary="Delete a single uploaded degree program (and its courses) by its id",
+)
+def delete_program(program_id: int):
+    """Delete one DegreeProgram by id, together with the courses under it."""
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        result = delete_program_by_id(program_id, DB_CONFIG)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to delete program: {e}")
+    if not result.get("found"):
+        raise HTTPException(status_code=404, detail=f"Program {program_id} not found.")
+    return JSONResponse(content=result)
 
 
 class RenameSkillsFromESCOResponse(BaseModel):
@@ -1844,43 +1941,36 @@ def process_pdf(request: PDFProcessingRequest):
     response = {
         "file": os.path.basename(pdf_path),
         "university_meta": {"name": university_name, "country": university_country, "domain": domain},
-        "gpu_config": {
-            "ollama_host": os.getenv("OLLAMA_HOST"),
-            "ollama_num_gpu": os.getenv("OLLAMA_NUM_GPU"),
-            "ollama_num_parallel": os.getenv("OLLAMA_NUM_PARALLEL"),
+        "llm_config": {
+            "api_url": os.getenv("API_URL"),
+            "model": os.getenv("MODEL_NAME", "mistral:latest"),
             "curriculnlp_workers": _bounded_workers(request.workers, CURRICUNLP_WORKERS, cap=8),
         },
         "labels": labels
     }
 
-    if request.use_ollama_summary:
+    if request.use_llm_summary:
         prompt = (
             "Extract a concise curriculum summary from the following PDF text. "
             "Return only valid JSON with keys: university, likely_programs, course_topics, notes.\n\n"
             + _clean_pdf_text(full_text)[:12000]
         )
-        response["ollama_summary"] = _ollama_generate(prompt, model=request.ollama_model)
+        response["llm_summary"] = _llm_generate(prompt, model=request.llm_model, json_mode=True)
 
     return JSONResponse(content=_json_safe(response))
 
 
-@app.get("/gpu/ollama_status", tags=["GPU", "Ollama"])
-def ollama_status():
+@app.get("/gpu/llm_status", tags=["LLM"])
+def llm_status():
+    info = {
+        "api_url": os.getenv("API_URL"),
+        "model": os.getenv("MODEL_NAME", "mistral:latest"),
+    }
     try:
-        return {
-            "status": "ok",
-            "ollama": _ollama_tags(),
-            "env": {
-                "OLLAMA_HOST": os.getenv("OLLAMA_HOST"),
-                "OLLAMA_NUM_GPU": os.getenv("OLLAMA_NUM_GPU"),
-                "OLLAMA_NUM_PARALLEL": os.getenv("OLLAMA_NUM_PARALLEL"),
-                "OLLAMA_MAX_LOADED_MODELS": os.getenv("OLLAMA_MAX_LOADED_MODELS"),
-                "OLLAMA_FLASH_ATTN": os.getenv("OLLAMA_FLASH_ATTN"),
-            },
-            "note": "Also run `nvidia-smi` while processing to confirm GPU utilization."
-        }
+        sample = _llm_generate("ping")
+        return {"status": "ok", "llm": info, "sample": sample[:80]}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Ollama is not reachable: {e}")
+        raise HTTPException(status_code=503, detail=f"LLM backend not reachable: {e}; config={info}")
 
 
 @app.get("/filter_skillnames", tags=["Skills"])
@@ -2426,11 +2516,6 @@ def _extract_course_skills_all_fields_task(
         set_status(status="failed", finished_at=time.time(), error="Database connection failed.")
         return
 
-    token = get_tracker_token()
-    if not token:
-        set_status(status="failed", finished_at=time.time(), error="Tracker token missing")
-        return
-
     def _build_pred(col: str, mode: str) -> str:
         return f"LOWER({col}) = LOWER(%s)" if mode == "exact" else f"LOWER({col}) LIKE LOWER(%s)"
 
@@ -2512,7 +2597,7 @@ def _extract_course_skills_all_fields_task(
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {
-                ex.submit(_extract_urls_for_course_all_fields, course): course["course_id"]
+                ex.submit(skill_extraction.extract_course_esco_matches, course): course["course_id"]
                 for course in courses
             }
 
@@ -2541,13 +2626,13 @@ def _extract_course_skills_all_fields_task(
             all_urls.update(url_map.keys())
 
         set_status(phase="resolving_skill_names", unique_skill_urls=len(all_urls))
-        url_meta = _resolve_urls_to_names(all_urls, token)
+        url_meta = skill_extraction.resolve_uris(all_urls)
 
         if all_urls and not url_meta:
             set_status(
                 status="failed",
                 finished_at=time.time(),
-                error="Skill URLs were extracted, but Tracker returned no skill metadata.",
+                error="Skills were extracted, but could not be resolved against the local ESCO taxonomy.",
                 unique_skill_urls=len(all_urls),
             )
             return
@@ -2614,6 +2699,105 @@ def _extract_course_skills_all_fields_task(
     except Exception as e:
         set_status(status="failed", finished_at=time.time(), error=str(e))
         logger.exception("[%s] Full-field skill extraction task crashed: %s", task_id, e)
+    finally:
+        try:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _extract_skills_for_course_ids(course_ids: List[int], workers: int = 8) -> Dict[str, Any]:
+    """Extract and store ESCO skills for a specific set of courses (best-effort).
+
+    Reuses the same pipeline as /extract_course_skills_all_fields but scoped to
+    an explicit list of course_ids, so it can run inline right after an upload
+    saves its courses. Never raises: on any problem it returns a summary dict
+    with a 'status' of 'skipped' or 'failed' so the caller can carry on.
+    """
+    ids = [int(c) for c in (course_ids or []) if c is not None]
+    if not ids:
+        return {"status": "skipped", "reason": "no course ids", "updated_courses": 0}
+    if not is_database_connected(DB_CONFIG):
+        return {"status": "skipped", "reason": "database not connected", "updated_courses": 0}
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+        placeholders = ",".join(["%s"] * len(ids))
+        cur.execute(
+            f"""
+            SELECT
+                c.course_id, c.university_id, c.lesson_name, c.degree_titles,
+                c.description, c.objectives, c.learning_outcomes, c.course_content,
+                c.assessment, c.exam, c.prerequisites, c.general_competences,
+                c.educational_material, c.attendance_type, c.language, c.hours,
+                c.semester_label, c.ects_list, c.mand_opt_list, c.msc_bsc_list,
+                c.fee_list, c.professors, c.extras
+            FROM Course c
+            WHERE c.course_id IN ({placeholders})
+            """,
+            tuple(ids),
+        )
+        courses = cur.fetchall() or []
+        cur.close(); cur = None
+        conn.close(); conn = None
+
+        if not courses:
+            return {"status": "succeeded", "processed_courses": 0, "updated_courses": 0}
+
+        extracted_maps: Dict[int, Dict[str, Set[str]]] = {}
+        max_workers = max(1, min(int(workers or 8), 32))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(skill_extraction.extract_course_esco_matches, course): course["course_id"]
+                for course in courses
+            }
+            for fut in as_completed(futures):
+                cid = futures[fut]
+                try:
+                    course_id, _title, url_to_categories = fut.result()
+                    extracted_maps[course_id] = url_to_categories
+                except Exception as e:
+                    logger.exception("Inline skill extraction failed for course_id=%s: %s", cid, e)
+                    extracted_maps[cid] = {}
+
+        all_urls: Set[str] = set()
+        for m in extracted_maps.values():
+            all_urls.update(m.keys())
+        url_meta = skill_extraction.resolve_uris(all_urls) if all_urls else {}
+
+        updated = 0
+        linked = 0
+        db_workers = max(1, min(int(os.getenv("SKILL_DB_WORKERS", "6")), 32))
+        with ThreadPoolExecutor(max_workers=db_workers) as dbex:
+            futures = {
+                dbex.submit(_db_write_course_skills, cid, extracted_maps.get(cid, {}), url_meta, None, None): cid
+                for cid in extracted_maps
+            }
+            for fut in as_completed(futures):
+                try:
+                    names = fut.result() or []
+                except Exception:
+                    names = []
+                if names:
+                    updated += 1
+                    linked += len(names)
+
+        return {
+            "status": "succeeded",
+            "processed_courses": len(courses),
+            "updated_courses": updated,
+            "unique_skill_urls": len(all_urls),
+            "linked_skill_names": linked,
+        }
+    except Exception as e:
+        logger.exception("Inline skill extraction crashed: %s", e)
+        return {"status": "failed", "error": str(e), "updated_courses": 0}
     finally:
         try:
             if cur:
@@ -2927,16 +3111,11 @@ def _calc_skillnames_task(
             )
             return
 
-        token = get_tracker_token()
-        if not token:
-            set_status(status="failed", finished_at=time.time(), error="Tracker token missing")
-            return
-
         extracted_maps = {}
         titles = {}
         processed = 0
         with ThreadPoolExecutor(max_workers=COURSE_WORKERS) as ex:
-            futs = {ex.submit(_extract_urls_for_course, c): c["course_id"] for c in courses}
+            futs = {ex.submit(skill_extraction.extract_course_esco_matches, c): c["course_id"] for c in courses}
             for fut in as_completed(futs):
                 cid = futs[fut]
                 try:
@@ -2953,7 +3132,7 @@ def _calc_skillnames_task(
         all_urls = set()
         for m in extracted_maps.values():
             all_urls.update(m.keys())
-        url_meta = _resolve_urls_to_names(all_urls, token)
+        url_meta = skill_extraction.resolve_uris(all_urls)
 
         results = {}
         processed2 = 0
@@ -3679,7 +3858,7 @@ def extract_course_skills_all_fields_direct(
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {
-                ex.submit(_extract_urls_for_course_all_fields, course): course
+                ex.submit(skill_extraction.extract_course_esco_matches, course): course
                 for course in courses
             }
 
@@ -3706,7 +3885,7 @@ def extract_course_skills_all_fields_direct(
 
         print("[4/5] Resolving ESCO URLs using local ESCO CSV...", flush=True)
 
-        url_meta = _resolve_urls_to_names_local_esco(all_urls)
+        url_meta = skill_extraction.resolve_uris(all_urls)
 
         missing = [
             url for url, meta in url_meta.items()
@@ -4057,7 +4236,7 @@ def clean_degrees(req: CleanRequest):
         raise HTTPException(status_code=400, detail=f"Folder not found: {folder}")
 
     backend = req.backend
-    model = req.model or ("gpt-4o-mini" if backend == "openai" else "llama3.1")
+    model = req.model or ("gpt-4o-mini" if backend == "openai" else "mistral:latest")
 
     if not req.inplace:
         outdir = req.outdir or os.path.join(folder, "_cleaned")
@@ -4076,9 +4255,9 @@ def clean_degrees(req: CleanRequest):
     totals = {"files": 0, "titles_before": 0, "titles_after": 0, "removed": 0}
     summaries: List[FileSummary] = []
 
-    # For Ollama, do not blindly use os.cpu_count(); too many concurrent LLM calls
-    # can cause GPU memory thrashing and look like a stall.
-    default_workers = int(os.getenv("OLLAMA_NUM_PARALLEL", "4")) if backend == "ollama" else PDF_CPU_WORKERS
+    # For the LLM backend, do not blindly use os.cpu_count(); too many concurrent
+    # LLM calls can overwhelm the backend and look like a stall.
+    default_workers = LLM_NUM_PARALLEL if backend == "mistral" else PDF_CPU_WORKERS
     max_workers = _bounded_workers(req.workers, default_workers, cap=16)
 
     def _clean_one(in_path: str) -> Dict[str, Any]:
@@ -5553,17 +5732,9 @@ def extract_one_course_with_llm(
         university_name: str,
         source_file: str,
         website: Optional[str] = None,
-        model: str = "llama3.1",
+        model: str = "mistral:latest",
         allow_missing_lesson_name: bool = False
 ) -> Optional[Dict[str, Any]]:
-
-    ollama_url = (
-        os.getenv("OLLAMA_HOST")
-        or os.getenv("OLLAMA_BASE_URL")
-        or os.getenv("OLLAMA_URL")
-        or "http://host.docker.internal:11434"
-    ).rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", model)
 
     prompt = f"""
 You extract exactly ONE university course/module from the text below.
@@ -5608,24 +5779,8 @@ TEXT:
 {block}
 """
 
-    response = requests.post(
-        f"{ollama_url}/api/generate",
-        json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0,
-                "num_predict": 4096
-            }
-        },
-        timeout=None
-    )
-    response.raise_for_status()
-
-    raw = response.json().get("response", "{}")
-    logger.info("OLLAMA ONE COURSE RAW:\n%s", raw[:3000])
+    raw = _llm_generate(prompt, model=model, temperature=0.0, json_mode=True) or "{}"
+    logger.info("LLM ONE COURSE RAW:\n%s", raw[:3000])
 
     try:
         course = json.loads(raw)
@@ -5789,13 +5944,13 @@ def _force_fixed_chunks(text: str, chunk_size: int = 2000, overlap: int = 250, l
 
     return chunks
 
-def detect_course_starts_with_ollama(
+def detect_course_starts_with_llm(
         pages: List[str],
         model: str,
         batch_size: int = 12,
         overlap_pages: int = 1
 ) -> List[Dict[str, Any]]:
-    """Detect course starts using regex first, then Ollama as fallback per small page batch."""
+    """Detect course starts using regex first, then the LLM as fallback per small page batch."""
 
     def _regex_starts_from_preview(previews: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         heading_re = re.compile(
@@ -5952,7 +6107,7 @@ Use the real page number from the provided page field.
 Pages:
 {json.dumps(previews, ensure_ascii=False)}
 """
-        raw = _ollama_generate(prompt, model=model, temperature=0.0)
+        raw = _llm_generate(prompt, model=model, temperature=0.0)
         starts = _extract_json_array(raw)
 
         if not starts:
@@ -6024,6 +6179,8 @@ async def upload_pdf_and_process(
         university_name: Optional[str] = Form(None),
         country: Optional[str] = Form(None),
         website: Optional[str] = Form(None),
+        degree_title: Optional[str] = Form(None, description="Optional program/degree title to group the uploaded courses under."),
+        degree_type: Optional[str] = Form(None, description="Optional degree type: BSc, MSc, PhD or Other."),
         save_to_db: bool = Form(False),
         translate: bool = Form(False),
         chunk_size: int = Form(2000),
@@ -6042,7 +6199,7 @@ async def upload_pdf_and_process(
                 "full_text = split whole PDF into detected course blocks, "
                 "per_page = split courses page by page, "
                 "force_chunk = ignore course splitting and process fixed-size chunks, "
-                "llm_course_boundaries = use Ollama to detect course start pages"
+                "llm_course_boundaries = use the LLM to detect course start pages"
             ),
         )
         ):
@@ -6131,9 +6288,9 @@ async def upload_pdf_and_process(
                 logger.warning("No page list available for llm_course_boundaries; falling back to full_text splitter")
                 blocks = split_course_blocks(cleaned_text)
             else:
-                starts = detect_course_starts_with_ollama(
+                starts = detect_course_starts_with_llm(
                     pages=pages,
-                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b")
+                    model=os.getenv("MODEL_NAME", "mistral:latest")
                 )
                 logger.info("LLM/regex detected %d course starts", len(starts))
 
@@ -6206,7 +6363,7 @@ async def upload_pdf_and_process(
                     university_name=final_university_name,
                     source_file=os.path.basename(pdf_path),
                     website=website,
-                    model=os.getenv("OLLAMA_MODEL", "gemma3:4b"),
+                    model=os.getenv("MODEL_NAME", "mistral:latest"),
                     allow_missing_lesson_name=True
                 )
 
@@ -6272,6 +6429,21 @@ async def upload_pdf_and_process(
         "courses": structured_courses
     }
 
+    # If a program/degree was supplied, group the uploaded courses under a
+    # DegreeProgram so they can be viewed and deleted as a program. Otherwise
+    # the courses are saved directly against the university (no program).
+    program_title = (degree_title or "").strip()
+    program_type = (degree_type or "").strip()
+    if program_title or program_type:
+        payload["degree_programs"] = [{
+            "degree_type": program_type or "Other",
+            "degree_titles": [program_title] if program_title else [],
+            "courses": structured_courses,
+        }]
+        payload["courses"] = []
+        payload["program_title"] = program_title or None
+        payload["degree_type"] = program_type or "Other"
+
     payload = _json_safe(payload)
     safe_payload = _json_safe(payload)
     logger.info("SAFE PAYLOAD: %s", json.dumps(safe_payload)[:5000])
@@ -6291,7 +6463,7 @@ async def upload_pdf_and_process(
 
         if background_tasks is None:
             raise HTTPException(status_code=500, detail="BackgroundTasks is not available.")
-        background_tasks.add_task(_save_payload_task, task_id, payload)
+        background_tasks.add_task(_save_payload_task, task_id, payload, extract_skills=True)
 
         payload["db_save"] = {
             "status": "queued",
