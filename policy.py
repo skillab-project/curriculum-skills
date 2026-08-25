@@ -27,6 +27,7 @@ SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bi
 
 
 def get_db():
+    _ensure_policy_schema_once()
     db = SessionLocal()
     try:
         yield db
@@ -62,6 +63,77 @@ class PolicyRecommendation(BasePolicy):
     top_n = Column(Integer, nullable=True)
     occupations = Column(JSON, nullable=True)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+
+
+# ==========================================
+# SCHEMA SELF-MIGRATION
+# ==========================================
+_POLICY_COLUMNS = {
+    "run_id": "VARCHAR(36) NULL",
+    "university_name": "VARCHAR(255) NULL",
+    "country": "VARCHAR(100) NULL",
+    "coverage_score": "FLOAT NULL",
+    "present_skills_count": "INT NULL",
+    "missing_skills_count": "INT NULL",
+    "missing_departments": "JSON NULL",
+    "missing_courses": "JSON NULL",
+    "threshold": "FLOAT NULL",
+    "top_n": "INT NULL",
+    "occupations": "JSON NULL",
+    "created_at": "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
+}
+_INDEXED_POLICY_COLUMNS = ("run_id", "university_name", "country")
+
+
+def _ensure_policy_schema() -> bool:
+    """Create the table if missing, then add any columns the model has that the
+    existing table lacks. Returns True on success. Never raises."""
+    try:
+        BasePolicy.metadata.create_all(bind=engine)
+    except Exception as e:
+        logger.error(f"❌ policy create_all failed: {e}")
+        return False
+
+    try:
+        with engine.begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'policy_recommendations'"
+                ))
+            }
+            if not existing:
+                # Table not found in this schema (nothing to migrate here).
+                return True
+            for col, ddl in _POLICY_COLUMNS.items():
+                if col not in existing:
+                    logger.warning("Adding missing column policy_recommendations.%s", col)
+                    conn.execute(text(f"ALTER TABLE policy_recommendations ADD COLUMN {col} {ddl}"))
+                    if col in _INDEXED_POLICY_COLUMNS:
+                        try:
+                            conn.execute(text(
+                                f"CREATE INDEX idx_policy_{col} ON policy_recommendations ({col})"
+                            ))
+                        except Exception:
+                            pass  # index may already exist; not critical
+        return True
+    except Exception as e:
+        logger.error(f"❌ policy schema migration failed: {e}")
+        return False
+
+
+_schema_ensured = False
+
+
+def _ensure_policy_schema_once() -> None:
+    """Run the schema check at most once per process (retries until it succeeds)."""
+    global _schema_ensured
+    if _schema_ensured:
+        return
+    if _ensure_policy_schema():
+        _schema_ensured = True
 
 
 # ==========================================
@@ -166,10 +238,7 @@ def trigger_analysis(
     and IMMEDIATELY returns a run_id. The user polls /policy/status/{run_id}
     and then reads /policy/results?run_id=...
     """
-    try:
-        BasePolicy.metadata.create_all(bind=engine)
-    except Exception as e:
-        logger.error(f"❌ Error creating table: {e}")
+    _ensure_policy_schema_once()
 
     run_id = str(uuid.uuid4())
 
@@ -202,10 +271,7 @@ def trigger_analysis_sync(
     result (universities + countries + run_id) without polling. Suitable
     for testing or small occupation lists.
     """
-    try:
-        BasePolicy.metadata.create_all(bind=engine)
-    except Exception as e:
-        logger.error(f"❌ Error creating table: {e}")
+    _ensure_policy_schema_once()
 
     run_id = str(uuid.uuid4())
 
