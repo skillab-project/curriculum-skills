@@ -27,6 +27,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 SERVICE2_URL = os.getenv("REQUIRED_SKILLS_SERVICE_URL", "https://portal.skillab-project.eu/diversity-analysis")
 TRACKER_BASE_URL = os.getenv("API_TRACKER_BASE_URL", "https://skillab-tracker.csd.auth.gr/api")
 
+COUNT_TIMEOUT = int(os.getenv("SKILLGAP_COUNT_TIMEOUT", "240"))
+COUNT_WORKERS = int(os.getenv("SKILLGAP_COUNT_WORKERS", "4"))
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "data", "New_occupation_table.csv")
 
@@ -245,7 +248,7 @@ def _get_skill_job_count(skill_id: str, token: str) -> int:
         data = f"skill_ids={requests.utils.quote(skill_id)}&skill_ids_logic=or"
         resp = requests.post(
             f"{TRACKER_BASE_URL}/jobs?page=1&page_size=1",
-            headers=headers, data=data, verify=False, timeout=240
+            headers=headers, data=data, verify=False, timeout=COUNT_TIMEOUT
         )
         if resp.ok:
             return resp.json().get("count", 0)
@@ -266,7 +269,7 @@ def _get_skill_profile_count(skill_id: str, token: str) -> int:
         data = f"skill_ids={requests.utils.quote(skill_id)}&skill_ids_logic=or"
         resp = requests.post(
             f"{TRACKER_BASE_URL}/profiles?page=1&page_size=1",
-            headers=headers, data=data, verify=False, timeout=240
+            headers=headers, data=data, verify=False, timeout=COUNT_TIMEOUT
         )
         if resp.ok:
             return resp.json().get("count", 0)
@@ -277,9 +280,10 @@ def _get_skill_profile_count(skill_id: str, token: str) -> int:
         return 0
 
 
-def fetch_counts_parallel(skills: List[Dict], token: str, max_workers: int = 10) -> List[Dict]:
+def fetch_counts_parallel(skills: List[Dict], token: str, max_workers: int = COUNT_WORKERS) -> List[Dict]:
     """Parallel fetch of demand + supply counts for all skills."""
-    logger.info(f"  Fetching counts for {len(skills)} skills (max_workers={max_workers})...")
+    total = len(skills)
+    logger.info(f"  Fetching counts for {total} skills (max_workers={max_workers}, timeout={COUNT_TIMEOUT}s)...")
 
     def fetch_one(skill: Dict) -> Dict:
         sid = skill.get("skill_id")
@@ -291,13 +295,18 @@ def fetch_counts_parallel(skills: List[Dict], token: str, max_workers: int = 10)
         return {**skill, "demand_count": demand, "supply_count": supply}
 
     enriched = []
+    done = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(fetch_one, s) for s in skills]
         for f in as_completed(futures):
             enriched.append(f.result())
+            done += 1
+            if done % 10 == 0 or done == total:
+                logger.info(f"  Counts progress: {done}/{total}")
 
     for s in enriched[:3]:
         logger.info(f"  Sample: {s.get('skill_name')} | demand={s.get('demand_count')} | supply={s.get('supply_count')}")
+    logger.info(f"  ✅ Counts fetched for {len(enriched)} skills.")
     return enriched
 
 

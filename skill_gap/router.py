@@ -100,8 +100,8 @@ def _run_shortterm_gap(run_id: str, occupations: List[str], threshold: float, to
         if not token:
             return {"error": "No tracker token", "run_id": run_id}
 
-        # Demand + supply once per unique skill
-        enriched = fetch_counts_parallel(pool, token, max_workers=3)
+        # Demand + supply once per unique skill (concurrency via SKILLGAP_COUNT_WORKERS)
+        enriched = fetch_counts_parallel(pool, token)
 
         demand_ranked = compute_rank_score(
             [{"skill_id": s["skill_id"], "skill_name": s["skill_name"],

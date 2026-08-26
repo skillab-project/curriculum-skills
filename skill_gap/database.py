@@ -79,16 +79,18 @@ def _ensure_skillgap_schema() -> bool:
 
     try:
         with engine.begin() as conn:
-            existing = {
-                row[0]
-                for row in conn.execute(text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = DATABASE() "
-                    "AND table_name = 'skill_gap_results'"
-                ))
-            }
-            if not existing:
-                return True
+            meta = conn.execute(text(
+                "SELECT column_name, column_type, is_nullable, column_key, extra "
+                "FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() "
+                "AND table_name = 'skill_gap_results'"
+            )).fetchall()
+            if not meta:
+                return True  # table not found in this schema; nothing to migrate
+
+            existing = {row[0] for row in meta}
+
+            # 1) Add any columns the model defines that the table is missing.
             for col, ddl in _SKILLGAP_COLUMNS.items():
                 if col not in existing:
                     logger.warning("Adding missing column skill_gap_results.%s", col)
@@ -100,6 +102,24 @@ def _ensure_skillgap_schema() -> bool:
                             ))
                         except Exception:
                             pass  # index may already exist; not critical
+
+            # Relax leftover NOT NULL columns the model no longer defines
+            model_cols = set(_SKILLGAP_COLUMNS.keys()) | {"id"}
+            for col_name, col_type, is_nullable, col_key, extra in meta:
+                if col_name in model_cols:
+                    continue
+                if str(col_key).upper() == "PRI" or "auto_increment" in str(extra or "").lower():
+                    continue
+                if str(is_nullable).upper() == "NO":
+                    logger.warning(
+                        "Relaxing leftover NOT NULL column skill_gap_results.%s to allow NULL", col_name
+                    )
+                    try:
+                        conn.execute(text(
+                            f"ALTER TABLE skill_gap_results MODIFY `{col_name}` {col_type} NULL"
+                        ))
+                    except Exception as e:
+                        logger.error("Could not relax leftover column %s: %s", col_name, e)
         return True
     except Exception as e:
         logger.error(f"skill_gap schema migration failed: {e}")
