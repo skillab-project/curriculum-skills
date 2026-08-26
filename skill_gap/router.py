@@ -345,8 +345,6 @@ def get_summary(
         if not all_results:
             return {"message": "No results found.", "data": []}
 
-        sorted_skills = sorted(all_results, key=lambda x: x.gap_score or 0, reverse=True)
-
         def fmt(s):
             return {
                 "skill": s.skill_name,
@@ -360,11 +358,20 @@ def get_summary(
                 "curriculum_courses": s.curriculum_courses or []
             }
 
+        # Split by the sign of gap_score:
+        #   gap_score > 0 -> hot skill (demand > supply)
+        #   gap_score < 0 -> oversupplied skill (supply > demand)
+        hot = [s for s in all_results if (s.gap_score or 0) > 0]
+        oversupplied = [s for s in all_results if (s.gap_score or 0) < 0]
+
+        hot_sorted = sorted(hot, key=lambda x: x.gap_score or 0, reverse=True)
+        oversupplied_sorted = sorted(oversupplied, key=lambda x: x.gap_score or 0)
+
         return {
             "run_id": run_id,
             "total_skills": len(all_results),
-            "hot_skills": [fmt(s) for s in sorted_skills[:top_n]],
-            "oversupplied_skills": [fmt(s) for s in sorted_skills[-top_n:]]
+            "hot_skills": [fmt(s) for s in hot_sorted[:top_n]],
+            "oversupplied_skills": [fmt(s) for s in oversupplied_sorted[:top_n]]
         }
     except Exception as e:
         return {"message": "Error.", "error": str(e)}
