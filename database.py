@@ -942,6 +942,43 @@ def delete_program_by_id(program_id: int, db_config: Dict[str, Any]) -> Dict[str
             pass
 
 
+def delete_university_by_id(university_id: int, db_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete a University and everything under it (programs, courses, skill links).
+
+    Course.university_id and DegreeProgram.university_id have ON DELETE CASCADE
+    foreign keys to University, and CourseSkill cascades from Course — so deleting
+    the University row removes all of it. Counts are gathered first for reporting.
+    """
+    conn = mysql.connector.connect(**db_config)
+    conn.autocommit = False
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM DegreeProgram WHERE university_id = %s", (university_id,))
+        program_count = int((cur.fetchone() or [0])[0])
+        cur.execute("SELECT COUNT(*) FROM Course WHERE university_id = %s", (university_id,))
+        course_count = int((cur.fetchone() or [0])[0])
+
+        cur.execute("DELETE FROM University WHERE university_id = %s", (university_id,))
+        deleted = int(cur.rowcount)
+        conn.commit()
+        return {
+            "university_id": university_id,
+            "found": deleted > 0,
+            "deleted_universities": deleted,
+            "deleted_programs": program_count if deleted else 0,
+            "deleted_courses": course_count if deleted else 0,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+
 def list_universities(db_config: Dict[str, Any], country: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return universities that have saved curriculum data, with per-university counts."""
     conn = mysql.connector.connect(**db_config)

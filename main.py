@@ -123,6 +123,7 @@ from database import (
     write_json_to_database,
     delete_course_by_id,
     delete_program_by_id,
+    delete_university_by_id,
     list_universities,
     get_university_curriculum,
     _labels_to_course,
@@ -1531,6 +1532,24 @@ def delete_program(program_id: int):
         raise HTTPException(status_code=502, detail=f"Failed to delete program: {e}")
     if not result.get("found"):
         raise HTTPException(status_code=404, detail=f"Program {program_id} not found.")
+    return JSONResponse(content=result)
+
+
+@app.delete(
+    "/university/{university_id}",
+    tags=["PDF", "Courses"],
+    summary="Delete a university and all its programs and courses by its id",
+)
+def delete_university(university_id: int):
+    """Delete one University by id, cascading to its programs, courses and skill links."""
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        result = delete_university_by_id(university_id, DB_CONFIG)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to delete university: {e}")
+    if not result.get("found"):
+        raise HTTPException(status_code=404, detail=f"University {university_id} not found.")
     return JSONResponse(content=result)
 
 
