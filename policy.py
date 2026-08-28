@@ -1,11 +1,12 @@
 import os
 import uuid
 import logging
-from typing import List
+from typing import List, Optional
+from datetime import date
 
-from fastapi import APIRouter, Depends, BackgroundTasks, Query, Body
+from fastapi import APIRouter, Depends, BackgroundTasks, Query, Body, HTTPException
 from sqlalchemy.orm import Session, declarative_base, sessionmaker, scoped_session
-from sqlalchemy import Column, Integer, String, JSON, TIMESTAMP, Float, text, create_engine
+from sqlalchemy import Column, Integer, String, JSON, TIMESTAMP, Float, Date, text, create_engine
 from pydantic import BaseModel, Field
 
 from policy_engine import EducationRecommendationSystem
@@ -51,8 +52,13 @@ class PolicyRecommendation(BasePolicy):
     __tablename__ = "policy_recommendations"
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(String(36), nullable=False, index=True)          # unique per analysis
+    # Analysis metadata / key
+    title = Column(String(512), nullable=True, index=True)           # unique title (analysis key)
+    description = Column(String(2048), nullable=True)
+    analysis_date = Column(Date, nullable=True)
+    filter_country = Column(String(255), nullable=True)              # analysis filter (stored)
     university_name = Column(String(255), nullable=False, index=True)
-    country = Column(String(100), nullable=True, index=True)
+    country = Column(String(100), nullable=True, index=True)         # the university's own country
     coverage_score = Column(Float, nullable=True)
     present_skills_count = Column(Integer, nullable=True)
     missing_skills_count = Column(Integer, nullable=True)
@@ -70,6 +76,10 @@ class PolicyRecommendation(BasePolicy):
 # ==========================================
 _POLICY_COLUMNS = {
     "run_id": "VARCHAR(36) NULL",
+    "title": "VARCHAR(512) NULL",
+    "description": "VARCHAR(2048) NULL",
+    "analysis_date": "DATE NULL",
+    "filter_country": "VARCHAR(255) NULL",
     "university_name": "VARCHAR(255) NULL",
     "country": "VARCHAR(100) NULL",
     "coverage_score": "FLOAT NULL",
@@ -82,7 +92,7 @@ _POLICY_COLUMNS = {
     "occupations": "JSON NULL",
     "created_at": "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
 }
-_INDEXED_POLICY_COLUMNS = ("run_id", "university_name", "country")
+_INDEXED_POLICY_COLUMNS = ("run_id", "university_name", "country", "title")
 
 
 def _ensure_policy_schema() -> bool:
@@ -105,7 +115,6 @@ def _ensure_policy_schema() -> bool:
                 ))
             }
             if not existing:
-                # Table not found in this schema (nothing to migrate here).
                 return True
             for col, ddl in _POLICY_COLUMNS.items():
                 if col not in existing:
@@ -117,7 +126,7 @@ def _ensure_policy_schema() -> bool:
                                 f"CREATE INDEX idx_policy_{col} ON policy_recommendations ({col})"
                             ))
                         except Exception:
-                            pass  # index may already exist; not critical
+                            pass
         return True
     except Exception as e:
         logger.error(f"❌ policy schema migration failed: {e}")
@@ -128,7 +137,6 @@ _schema_ensured = False
 
 
 def _ensure_policy_schema_once() -> None:
-    """Run the schema check at most once per process (retries until it succeeds)."""
     global _schema_ensured
     if _schema_ensured:
         return
@@ -136,39 +144,50 @@ def _ensure_policy_schema_once() -> None:
         _schema_ensured = True
 
 
+def _title_exists(title: str) -> bool:
+    db = SessionLocal()
+    try:
+        return db.query(PolicyRecommendation).filter(PolicyRecommendation.title == title).first() is not None
+    finally:
+        db.close()
+
+
 # ==========================================
 # REQUEST SCHEMA
 # ==========================================
 class PolicyAnalyzeRequest(BaseModel):
+    title: str = Field(..., description="Unique title for this analysis (used as key).")
+    description: Optional[str] = Field(None, description="Optional description.")
+    day: Optional[int] = Field(None, description="Day of analysis date.")
+    month: Optional[int] = Field(None, description="Month of analysis date.")
+    year: Optional[int] = Field(None, description="Year of analysis date.")
+    country: Optional[str] = Field(None, description="Country filter (stored as analysis filter).")
     occupations: List[str] = Field(
-        ...,
-        min_items=1,
+        ..., min_items=1,
         description="List of occupations selected by the user.",
         example=["Web and multimedia developers", "Web technicians"]
     )
-    threshold: float = Field(
-        0.0, ge=0.0, le=1.0,
-        description="Minimum Importance threshold per skill (0.0 = rely on top_n)."
-    )
-    top_n: int = Field(
-        100, ge=1, le=500,
-        description="Maximum number of skills per occupation (e.g. top 100)."
-    )
+    threshold: float = Field(0.0, ge=0.0, le=1.0, description="Minimum Importance threshold per skill.")
+    top_n: int = Field(100, ge=1, le=500, description="Maximum number of skills per occupation.")
 
 
 # ==========================================
 # SAVE HELPER
 # ==========================================
 def _save_results_to_db(db: Session, results: dict, run_id: str,
-                        occupations: List[str], threshold: float, top_n: int):
-    """
-    Each run is new (unique run_id) -> always insert, never overwrite.
-    """
+                        occupations: List[str], threshold: float, top_n: int,
+                        title: str, description: Optional[str],
+                        analysis_date, filter_country: Optional[str]):
+    """Each run is new (unique run_id) -> always insert, never overwrite."""
     universities = results.get("universities", {})
     count = 0
     for uni, data in universities.items():
         db.add(PolicyRecommendation(
             run_id=run_id,
+            title=title,
+            description=description,
+            analysis_date=analysis_date,
+            filter_country=filter_country,
             university_name=uni,
             country=data.get("country"),
             coverage_score=data.get("coverage_score", 0.0),
@@ -189,18 +208,18 @@ def _save_results_to_db(db: Session, results: dict, run_id: str,
 # ==========================================
 # WRAPPERS
 # ==========================================
-def run_policy_analysis_logic(db: Session, run_id: str, occupations: List[str],
-                              threshold: float, top_n: int):
+def run_policy_analysis_logic(db: Session, run_id: str, payload: PolicyAnalyzeRequest, analysis_date):
     logger.info(
         f"Starting Policy Gap Analysis run_id={run_id} "
-        f"(occupations={occupations}, threshold={threshold}, top_n={top_n})"
+        f"(title={payload.title}, occupations={payload.occupations}, "
+        f"threshold={payload.threshold}, top_n={payload.top_n})"
     )
 
     system = EducationRecommendationSystem(SERVICE2_URL)
     results = system.run_analysis(
-        occupations=occupations,
-        skill_threshold=threshold,
-        top_n=top_n
+        occupations=payload.occupations,
+        skill_threshold=payload.threshold,
+        top_n=payload.top_n
     )
 
     if "error" in results:
@@ -208,19 +227,31 @@ def run_policy_analysis_logic(db: Session, run_id: str, occupations: List[str],
         return
 
     try:
-        _save_results_to_db(db, results, run_id, occupations, threshold, top_n)
+        _save_results_to_db(
+            db, results, run_id, payload.occupations, payload.threshold, payload.top_n,
+            title=payload.title, description=payload.description,
+            analysis_date=analysis_date, filter_country=payload.country
+        )
     except Exception as e:
         logger.error(f"❌ Database save error: {e}")
         db.rollback()
 
 
-def background_task_wrapper(run_id: str, occupations: List[str],
-                            threshold: float, top_n: int):
+def background_task_wrapper(run_id: str, payload: PolicyAnalyzeRequest, analysis_date):
     db = SessionLocal()
     try:
-        run_policy_analysis_logic(db, run_id, occupations, threshold, top_n)
+        run_policy_analysis_logic(db, run_id, payload, analysis_date)
     finally:
         db.close()
+
+
+def _parse_date(payload: PolicyAnalyzeRequest):
+    if payload.year and payload.month and payload.day:
+        try:
+            return date(payload.year, payload.month, payload.day)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date (day/month/year).")
+    return None
 
 
 # ==========================================
@@ -234,29 +265,31 @@ def trigger_analysis(
     db: Session = Depends(get_db)
 ):
     """
-    Accepts a list of occupations, runs the gap analysis in the background,
-    and IMMEDIATELY returns a run_id. The user polls /policy/status/{run_id}
-    and then reads /policy/results?run_id=...
+    Accepts occupations + title/description/date/country, runs the gap analysis
+    in the background, and returns a run_id. Title is the unique key.
     """
     _ensure_policy_schema_once()
 
+    if _title_exists(payload.title):
+        raise HTTPException(
+            status_code=409,
+            detail=f"An analysis with title '{payload.title}' already exists. Use a different title."
+        )
+
+    analysis_date = _parse_date(payload)
     run_id = str(uuid.uuid4())
 
-    background_tasks.add_task(
-        background_task_wrapper,
-        run_id,
-        payload.occupations,
-        payload.threshold,
-        payload.top_n
-    )
+    background_tasks.add_task(background_task_wrapper, run_id, payload, analysis_date)
 
     return {
         "message": "Analysis started in background.",
         "run_id": run_id,
+        "title": payload.title,
         "parameters": {
             "occupations": payload.occupations,
             "threshold": payload.threshold,
-            "top_n": payload.top_n
+            "top_n": payload.top_n,
+            "country": payload.country
         }
     }
 
@@ -266,13 +299,16 @@ def trigger_analysis_sync(
     payload: PolicyAnalyzeRequest = Body(...),
     db: Session = Depends(get_db)
 ):
-    """
-    Same logic but blocking: runs, saves, and directly returns the full
-    result (universities + countries + run_id) without polling. Suitable
-    for testing or small occupation lists.
-    """
+    """Same logic but blocking; returns the full result. Rejects duplicate titles."""
     _ensure_policy_schema_once()
 
+    if _title_exists(payload.title):
+        raise HTTPException(
+            status_code=409,
+            detail=f"An analysis with title '{payload.title}' already exists. Use a different title."
+        )
+
+    analysis_date = _parse_date(payload)
     run_id = str(uuid.uuid4())
 
     system = EducationRecommendationSystem(SERVICE2_URL)
@@ -287,22 +323,25 @@ def trigger_analysis_sync(
         return results
 
     try:
-        _save_results_to_db(db, results, run_id, payload.occupations,
-                            payload.threshold, payload.top_n)
+        _save_results_to_db(
+            db, results, run_id, payload.occupations, payload.threshold, payload.top_n,
+            title=payload.title, description=payload.description,
+            analysis_date=analysis_date, filter_country=payload.country
+        )
     except Exception as e:
         logger.error(f"❌ Database save error: {e}")
         db.rollback()
 
     results["run_id"] = run_id
+    results["title"] = payload.title
+    results["description"] = payload.description
+    results["date"] = analysis_date.isoformat() if analysis_date else None
+    results["filter_country"] = payload.country
     return results
 
 
 @router.get("/policy/status/{run_id}", summary="Check if an analysis run has finished")
 def get_run_status(run_id: str, db: Session = Depends(get_db)):
-    """
-    Returns whether the background run has completed (records exist) or is
-    still in progress.
-    """
     count = db.query(PolicyRecommendation).filter_by(run_id=run_id).count()
     return {
         "run_id": run_id,
@@ -311,12 +350,9 @@ def get_run_status(run_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/policy/runs", summary="List all analysis runs with their occupations")
+@router.get("/policy/runs", summary="List all analysis runs with their filters")
 def list_runs(db: Session = Depends(get_db)):
-    """
-    Returns every analysis that has been run (per run_id), so the user knows
-    which run corresponds to which occupations.
-    """
+    """Every analysis with its title, description, date, and filters."""
     rows = (
         db.query(PolicyRecommendation)
         .order_by(PolicyRecommendation.created_at.desc())
@@ -328,10 +364,16 @@ def list_runs(db: Session = Depends(get_db)):
         if r.run_id not in seen:
             seen[r.run_id] = {
                 "run_id": r.run_id,
-                "occupations": r.occupations,
-                "threshold": r.threshold,
-                "top_n": r.top_n,
+                "title": r.title,
+                "description": r.description,
+                "date": r.analysis_date.isoformat() if r.analysis_date else None,
                 "created_at": r.created_at,
+                "filters": {
+                    "occupations": r.occupations,
+                    "threshold": r.threshold,
+                    "top_n": r.top_n,
+                    "country": r.filter_country,
+                },
                 "universities_count": 0
             }
         seen[r.run_id]["universities_count"] += 1
@@ -339,21 +381,24 @@ def list_runs(db: Session = Depends(get_db)):
     return {"runs": list(seen.values())}
 
 
-@router.get("/policy/results", summary="Get per-university recommendations for a run")
+@router.get("/policy/results", summary="Get per-university recommendations by title")
 def get_results(
     db: Session = Depends(get_db),
-    run_id: str = Query(None, description="Filter by a specific analysis run"),
-    country: str = Query(None, description="Optional: filter by country name"),
+    title: str = Query(None, description="Fetch the results of the analysis with this title"),
+    run_id: str = Query(None, description="Alternatively, filter by a specific run_id"),
+    country: str = Query(None, description="Optional: filter by the university's country"),
     university: str = Query(None, description="Optional: filter by university name"),
     limit: int = Query(None, ge=1, le=1000)
 ):
     """
-    Per-university coverage/gap. Provide run_id to get the results of a
-    specific analysis (search coverage by Universities).
+    Per-university coverage/gap. Prefer `title` (the analysis key); `run_id`
+    is still supported. Optional country/university filters on the read side.
     """
     try:
         q = db.query(PolicyRecommendation)
 
+        if title is not None:
+            q = q.filter(PolicyRecommendation.title == title)
         if run_id is not None:
             q = q.filter(PolicyRecommendation.run_id == run_id)
         if country is not None:
@@ -374,17 +419,17 @@ def get_results(
         return {"message": "No results yet or table missing.", "error": str(e)}
 
 
-@router.get("/policy/results/by_country", summary="Aggregate coverage per country for a run")
+@router.get("/policy/results/by_country", summary="Aggregate coverage per country for an analysis")
 def get_results_by_country(
     db: Session = Depends(get_db),
-    run_id: str = Query(None, description="Filter by a specific analysis run")
+    title: str = Query(None, description="Aggregate the analysis with this title"),
+    run_id: str = Query(None, description="Alternatively, a specific run_id")
 ):
-    """
-    Aggregated coverage per country, computed from the per-university records
-    of a run: average coverage and number of universities.
-    """
+    """Aggregated coverage per country, from the per-university records."""
     try:
         q = db.query(PolicyRecommendation)
+        if title is not None:
+            q = q.filter(PolicyRecommendation.title == title)
         if run_id is not None:
             q = q.filter(PolicyRecommendation.run_id == run_id)
 

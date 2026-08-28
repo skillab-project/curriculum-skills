@@ -368,10 +368,11 @@ def compute_gap(demand_skills: List[Dict], supply_skills: List[Dict]) -> List[Di
 # ==========================================
 # CURRICULUM CROSS-CHECK (YES/NO + in which courses)
 # ==========================================
-def check_skills_in_curriculum(skill_ids: List[str]) -> Dict[str, Dict]:
+def check_skills_in_curriculum(skill_ids: List[str], country: Optional[str] = None) -> Dict[str, Dict]:
     """
     For each skill_id (ESCO url), checks whether it is taught anywhere in the
-    universities DB and in which courses.
+    universities DB and in which courses. If `country` is given, only
+    universities of that country are considered (coverage is scoped to it).
 
     Returns: { skill_id: {"in_curriculum": bool, "courses": [ "<course> (<university>) - [<country>]", ... ]} }
     Matching is done on Skill.skill_url (robust, label-independent).
@@ -390,16 +391,21 @@ def check_skills_in_curriculum(skill_ids: List[str]) -> Dict[str, Dict]:
         for i in range(0, len(ids), BATCH_SIZE):
             batch = ids[i:i + BATCH_SIZE]
             placeholders = ', '.join(['%s'] * len(batch))
+            params = list(batch)
+            country_clause = ""
+            if country and country.strip():
+                country_clause = " AND LOWER(u.country) LIKE LOWER(%s)"
+                params.append(f"%{country.strip()}%")
             query = f"""
                 SELECT s.skill_url, c.lesson_name, u.university_name, u.country
                 FROM Skill s
                 JOIN CourseSkill cs ON s.skill_id = cs.skill_id
                 JOIN Course c ON cs.course_id = c.course_id
                 JOIN University u ON c.university_id = u.university_id
-                WHERE s.skill_url IN ({placeholders})
+                WHERE s.skill_url IN ({placeholders}){country_clause}
                 LIMIT 2000
             """
-            cursor.execute(query, batch)
+            cursor.execute(query, params)
             rows = cursor.fetchall()
             for r in rows:
                 sid = r["skill_url"].strip() if r.get("skill_url") else None

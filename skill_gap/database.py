@@ -5,7 +5,7 @@ SQLAlchemy setup, DB model and connection helpers.
 """
 import os
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, Boolean, TIMESTAMP, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, Boolean, TIMESTAMP, Date, text
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
 logger = logging.getLogger(__name__)
@@ -24,23 +24,23 @@ class SkillGapResult(Base):
     __tablename__ = "skill_gap_results"
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(String(36), nullable=False, index=True)   # unique per analysis run
+    # Analysis metadata / key
+    title = Column(String(512), nullable=True, index=True)    # unique title (analysis key)
+    description = Column(String(2048), nullable=True)
+    analysis_date = Column(Date, nullable=True)
+    # Analysis filters
+    country = Column(String(255), nullable=True)              # scopes curriculum coverage
+    university = Column(String(512), nullable=True)           # stored filter
     skill_name = Column(String(512), nullable=True)
     skill_id = Column(String(512), nullable=True, index=True)  # ESCO url
-    # Which of the selected occupations required this skill
     occupations = Column(JSON, nullable=True)
-    # Counts from tracker API
-    demand_count = Column(Integer, nullable=True)   # how many job ads contain this skill
-    supply_count = Column(Integer, nullable=True)   # how many CVs contain this skill
-    # Rank-based scores (0-100%)
-    demand_score = Column(Float, nullable=True)     # position in demand list
-    supply_score = Column(Float, nullable=True)     # position in supply list
-    # Gap = demand_score - supply_score
-    # > 0 -> hot skill, < 0 -> oversupplied
+    demand_count = Column(Integer, nullable=True)
+    supply_count = Column(Integer, nullable=True)
+    demand_score = Column(Float, nullable=True)
+    supply_score = Column(Float, nullable=True)
     gap_score = Column(Float, nullable=True)
-    # Curriculum cross-check (against the universities DB)
-    in_curriculum = Column(Boolean, nullable=True)          # YES/NO: taught anywhere in the DB
-    curriculum_courses = Column(JSON, nullable=True)        # in which courses it is taught
-    # Analysis parameters
+    in_curriculum = Column(Boolean, nullable=True)
+    curriculum_courses = Column(JSON, nullable=True)
     threshold = Column(Float, nullable=True)
     top_n = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
@@ -51,6 +51,11 @@ class SkillGapResult(Base):
 # ==========================================================
 _SKILLGAP_COLUMNS = {
     "run_id": "VARCHAR(36) NULL",
+    "title": "VARCHAR(512) NULL",
+    "description": "VARCHAR(2048) NULL",
+    "analysis_date": "DATE NULL",
+    "country": "VARCHAR(255) NULL",
+    "university": "VARCHAR(512) NULL",
     "skill_name": "VARCHAR(512) NULL",
     "skill_id": "VARCHAR(512) NULL",
     "occupations": "JSON NULL",
@@ -65,7 +70,7 @@ _SKILLGAP_COLUMNS = {
     "top_n": "INT NULL",
     "created_at": "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
 }
-_INDEXED_SKILLGAP_COLUMNS = ("run_id", "skill_id")
+_INDEXED_SKILLGAP_COLUMNS = ("run_id", "skill_id", "title")
 
 
 def _ensure_skillgap_schema() -> bool:
@@ -86,11 +91,10 @@ def _ensure_skillgap_schema() -> bool:
                 "AND table_name = 'skill_gap_results'"
             )).fetchall()
             if not meta:
-                return True  # table not found in this schema; nothing to migrate
+                return True
 
             existing = {row[0] for row in meta}
 
-            # 1) Add any columns the model defines that the table is missing.
             for col, ddl in _SKILLGAP_COLUMNS.items():
                 if col not in existing:
                     logger.warning("Adding missing column skill_gap_results.%s", col)
@@ -101,9 +105,8 @@ def _ensure_skillgap_schema() -> bool:
                                 f"CREATE INDEX idx_skillgap_{col} ON skill_gap_results ({col})"
                             ))
                         except Exception:
-                            pass  # index may already exist; not critical
+                            pass
 
-            # Relax leftover NOT NULL columns the model no longer defines
             model_cols = set(_SKILLGAP_COLUMNS.keys()) | {"id"}
             for col_name, col_type, is_nullable, col_key, extra in meta:
                 if col_name in model_cols:
@@ -130,7 +133,6 @@ _schema_ensured = False
 
 
 def _ensure_skillgap_schema_once() -> None:
-    """Run the schema check at most once per process (retries until it succeeds)."""
     global _schema_ensured
     if _schema_ensured:
         return
@@ -139,9 +141,6 @@ def _ensure_skillgap_schema_once() -> None:
 
 
 def SessionLocal():
-    """Session factory that also self-heals the skill_gap_results schema once
-    before handing back a session. Kept callable exactly like the previous
-    scoped_session so all `db = SessionLocal()` call sites are unchanged."""
     _ensure_skillgap_schema_once()
     return _SessionFactory()
 
