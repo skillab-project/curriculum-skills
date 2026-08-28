@@ -23,8 +23,7 @@ from config import DB_CONFIG
 logger = logging.getLogger(__name__)
 
 # --- Αρχικοποίηση των Routers (Απαραίτητα για το main.py / __init__.py) ---
-curriculum_router = APIRouter()
-full_pipeline_router = APIRouter()
+full_pipeline_router = APIRouter(prefix="/longterm")
 
 # --- Ορισμός του TRENDS_BASE_URL (π.χ. από περιβαλλοντικές μεταβλητές) ---
 TRENDS_BASE_URL = os.getenv("TRENDS_API_BASE_URL", "https://portal.skillab-project.eu/future-technology-trends-identifier")
