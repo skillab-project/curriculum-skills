@@ -175,8 +175,8 @@ from datetime import datetime
 
 from policy import router as policy_router
 
+
 from skill_gap.router import router as skill_gap_router
-from skill_gap.longterm_pipeline import curriculum_router as sg_curriculum_router
 from skill_gap.longterm_pipeline import full_pipeline_router as sg_pipeline_router
 
 logger = logging.getLogger("db_saver")
@@ -947,7 +947,6 @@ app.include_router(
 )
 
 app.include_router(skill_gap_router, prefix="/skill-gap")
-app.include_router(sg_curriculum_router, prefix="/skill-gap")
 app.include_router(sg_pipeline_router, prefix="/skill-gap")
 
 class DebugPDFRequest(BaseModel):
