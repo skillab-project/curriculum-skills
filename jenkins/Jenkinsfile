@@ -51,7 +51,8 @@ pipeline {
                 withCredentials([
                     usernamePassword(credentialsId: 'tracker-api-creds', usernameVariable: 'TRACKER_USER', passwordVariable: 'TRACKER_PASS'),
                     string(credentialsId: 'browserless-creds', variable: 'BROWSERLESS_PASS'),
-                    string(credentialsId: 'hf-creds', variable: 'HF_PASS')
+                    string(credentialsId: 'hf-creds', variable: 'HF_PASS'),
+                    string(credentialsId: 'llm-api-creds', variable: 'LLM_API_PASS')
                 ]) {
                     sh '''
                         echo "" >> .env
@@ -59,6 +60,7 @@ pipeline {
                         echo "TRACKER_PASSWORD=${TRACKER_PASS}" >> .env
                         echo "BROWSERLESS_WS=${BROWSERLESS_PASS}" >> .env
                         echo "HF_API_TOKEN=${HF_PASS}" >> .env
+                        echo "API_TOKEN=${LLM_API_PASS}" >> .env
                         DOCKER_TAG=test docker compose build --no-cache
                     '''
                 }

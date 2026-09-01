@@ -51,7 +51,7 @@ services:
       - TRENDS_API_BASE_URL=https://portal.skillab-project.eu/future-technology-trends-identifier
       - REQUIRED_SKILLS_SERVICE_URL=https://portal.skillab-project.eu/diversity-analysis
       - API_URL=http://160.40.52.27:3000
-      - API_TOKEN=${API_TOKEN}
+      # - API_TOKEN=${API_TOKEN}
       - MODEL_NAME=mistral:latest
     command: >
       uvicorn main:app --host 0.0.0.0 --port 8000 --reload

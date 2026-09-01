@@ -40,7 +40,8 @@ class TitleGapResult(_TitleBase):
     __tablename__ = "title_gap_results"
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(String(36), nullable=False, index=True)
-    title = Column(String(512), nullable=False, index=True)
+    title = Column(String(512), nullable=False, index=True)      # unique save key
+    source_title = Column(String(512), nullable=True, index=True) # FTTI analysis title used as source
     description = Column(String(2048), nullable=True)
     analysis_date = Column(Date, nullable=True)
     country = Column(String(255), nullable=True)                # analysis filter
@@ -52,6 +53,48 @@ class TitleGapResult(_TitleBase):
     curriculum_courses = Column(JSON, nullable=True)
     esco_threshold = Column(Float, nullable=True)
     created_at = Column(TIMESTAMP, server_default=sa_text("CURRENT_TIMESTAMP"))
+
+
+# ==========================================
+# SCHEMA SELF-MIGRATION
+# ==========================================
+_TITLE_GAP_COLUMNS = {
+    "source_title": "VARCHAR(512) NULL",
+}
+
+
+def _ensure_title_schema():
+    """Create the table if missing, then add any columns the model has that the
+    existing table lacks (e.g. source_title on older DBs). Never raises."""
+    try:
+        _TitleBase.metadata.create_all(bind=_title_engine)
+    except Exception as e:
+        logger.error(f"title_gap create_all failed: {e}")
+        return
+    try:
+        with _title_engine.begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(sa_text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'title_gap_results'"
+                ))
+            }
+            if not existing:
+                return
+            for col, ddl in _TITLE_GAP_COLUMNS.items():
+                if col not in existing:
+                    logger.warning("Adding missing column title_gap_results.%s", col)
+                    conn.execute(sa_text(f"ALTER TABLE title_gap_results ADD COLUMN {col} {ddl}"))
+                    try:
+                        conn.execute(sa_text(
+                            f"CREATE INDEX idx_title_gap_{col} ON title_gap_results ({col})"
+                        ))
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.error(f"title_gap column migration failed: {e}")
 
 
 # --- Tsouk policies/by-title fetch ---
@@ -161,7 +204,8 @@ def _title_exists(title: str) -> bool:
 
 
 class TitleGapRequest(BaseModel):
-    title: str
+    title: str                                  # unique save key for this long-term analysis
+    source_title: Optional[str] = None          # FTTI analysis title to pull skills from
     description: Optional[str] = None
     day: Optional[int] = None
     month: Optional[int] = None
@@ -176,12 +220,18 @@ class TitleGapRequest(BaseModel):
 )
 def gap_by_title(req: TitleGapRequest):
     """
-    Start a title-gap analysis. Title is the unique key: if one already exists,
-    the request is rejected. Skills come from all policy jobs of the title
-    (union, distinct by ESCO url); curriculum coverage is scoped to `country`
-    if provided; results are saved under a run_id.
+    Start a title-gap analysis. `title` is the unique save key: if one already
+    exists, the request is rejected. `source_title` is the Future Technology
+    Trends analysis whose policy jobs supply the skills — it defaults to `title`
+    for backward compatibility. This lets several long-term analyses (e.g. one
+    per country) be saved for the SAME source analysis under distinct titles.
+    Skills come from all policy jobs of the source (union, distinct by ESCO url);
+    curriculum coverage is scoped to `country` if provided; results are saved
+    under a run_id.
     """
-    _TitleBase.metadata.create_all(bind=_title_engine)
+    _ensure_title_schema()
+
+    source_title = req.source_title or req.title
 
     if _title_exists(req.title):
         raise HTTPException(
@@ -196,9 +246,9 @@ def gap_by_title(req: TitleGapRequest):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date (day/month/year).")
 
-    jobs = _fetch_policies_by_title(req.title)
+    jobs = _fetch_policies_by_title(source_title)
     if not jobs:
-        raise HTTPException(status_code=404, detail=f"No policy jobs found for title '{req.title}'.")
+        raise HTTPException(status_code=404, detail=f"No policy jobs found for source title '{source_title}'.")
 
     pool = _extract_skills_with_url_from_policy_jobs(jobs, threshold=req.esco_threshold)
     if not pool:
@@ -214,6 +264,7 @@ def gap_by_title(req: TitleGapRequest):
             db.add(TitleGapResult(
                 run_id=run_id,
                 title=req.title,
+                source_title=source_title,
                 description=req.description,
                 analysis_date=analysis_date,
                 country=req.country,
@@ -248,6 +299,7 @@ def gap_by_title(req: TitleGapRequest):
     return {
         "run_id": run_id,
         "title": req.title,
+        "source_title": source_title,
         "description": req.description,
         "date": analysis_date.isoformat() if analysis_date else None,
         "country": req.country,
@@ -269,7 +321,7 @@ def gap_by_title_runs():
     List every saved analysis with its title, description, date, and filters
     (country, esco_threshold), plus how many skills it produced.
     """
-    _TitleBase.metadata.create_all(bind=_title_engine)
+    _ensure_title_schema()
     db = _TitleSession()
     try:
         rows = db.query(TitleGapResult).order_by(TitleGapResult.created_at.desc()).all()
@@ -279,6 +331,7 @@ def gap_by_title_runs():
                 seen[r.run_id] = {
                     "run_id": r.run_id,
                     "title": r.title,
+                    "source_title": r.source_title,
                     "description": r.description,
                     "date": r.analysis_date.isoformat() if r.analysis_date else None,
                     "created_at": r.created_at,
@@ -306,7 +359,7 @@ def gap_by_title_results(
     Read back the saved results of an analysis, identified by its title.
     Optionally filter the skills by in_curriculum.
     """
-    _TitleBase.metadata.create_all(bind=_title_engine)
+    _ensure_title_schema()
     db = _TitleSession()
     try:
         q = db.query(TitleGapResult).filter(TitleGapResult.title == title)
@@ -330,6 +383,7 @@ def gap_by_title_results(
         return {
             "run_id": first.run_id,
             "title": first.title,
+            "source_title": first.source_title,
             "description": first.description,
             "date": first.analysis_date.isoformat() if first.analysis_date else None,
             "filters": {"country": first.country, "esco_threshold": first.esco_threshold},
