@@ -14,6 +14,7 @@ from functools import partial
 from threading import Lock, Semaphore
 from cleaner import clean_file, iter_json_files
 import csv
+from recommendations_llm import router as recommendations_llm_router
 
 _ESCO_LABEL_CACHE: Optional[Dict[str, Dict[str, Optional[str]]]] = None
 
@@ -936,6 +937,7 @@ def recommend_courses_post(payload: Dict[str, Any] = Body(default_factory=dict))
         "courses": courses,
     }
 
+app.include_router(recommendations_llm_router)
 
 app.include_router(recommendation_filters_router)
 app.include_router(recommendation_courses_router)
