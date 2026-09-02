@@ -6192,7 +6192,7 @@ def build_course_blocks_from_starts(
 @app.post(
     "/pdf/upload_and_process",
     tags=["PDF", "CurricuNLP"],
-    summary="Upload a PDF, run CurricuNLP, segment it into structured courses"
+    summary="Upload a PDF and start CurricuNLP processing in the background"
 )
 async def upload_pdf_and_process(
         file: UploadFile = File(...),
@@ -6223,6 +6223,12 @@ async def upload_pdf_and_process(
             ),
         )
         ):
+    """Save the PDF, then run the (slow) CurricuNLP pipeline in the background.
+
+    Returns immediately with a `job_id`; poll
+    `/pdf/upload_and_process/status/{job_id}` for progress and, once finished,
+    the full result.
+    """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -6231,9 +6237,115 @@ async def upload_pdf_and_process(
     safe_name = f"{uuid4()}_{_safe_filename(file.filename)}"
     pdf_path = os.path.join(UPLOAD_PDF_DIR, safe_name)
 
+    # Persist the upload now — the request's UploadFile stream is closed once we
+    # return, so the background worker reads the saved file from disk instead.
     with open(pdf_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    job_id = str(uuid4())
+    TASKS[job_id] = {
+        "status": "queued",
+        "queued_at": time.time(),
+        "type": "upload_pdf_and_process",
+        "source_file": os.path.basename(pdf_path),
+        "original_filename": file.filename,
+        "university_name": university_name,
+        "progress": {"done": 0, "total": 0, "phase": "queued"},
+    }
+
+    if background_tasks is None:
+        raise HTTPException(status_code=500, detail="BackgroundTasks is not available.")
+
+    background_tasks.add_task(
+        _upload_and_process_worker,
+        job_id, pdf_path, file.filename,
+        university_name, country, website, degree_title, degree_type,
+        save_to_db, translate, chunk_size, overlap, max_chars, split_mode,
+    )
+
+    return JSONResponse(content={
+        "status": "started",
+        "job_id": job_id,
+        "note": "Poll /curriculum-skills/pdf/upload_and_process/status/{job_id} for progress and results.",
+    })
+
+
+@app.get(
+    "/pdf/upload_and_process/status/{job_id}",
+    tags=["PDF", "CurricuNLP"],
+    summary="Poll an upload_and_process job for progress and the final result",
+)
+def upload_and_process_status(job_id: str):
+    """Return the job's status/progress. While in flight, `status` is
+    'queued' | 'running' with a `progress` object; when finished, `status` is
+    'succeeded' (with the full `result`) or 'failed' (with an `error`)."""
+    task = TASKS.get(job_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse(content=_json_safe(task))
+
+
+def _upload_and_process_worker(
+    job_id: str,
+    pdf_path: str,
+    original_filename: str,
+    university_name: Optional[str],
+    country: Optional[str],
+    website: Optional[str],
+    degree_title: Optional[str],
+    degree_type: Optional[str],
+    save_to_db: bool,
+    translate: bool,
+    chunk_size: int,
+    overlap: int,
+    max_chars: int,
+    split_mode: str,
+):
+    """Run the CurricuNLP pipeline for one uploaded PDF (off the request thread)
+    and store the result — or the error — in TASKS[job_id]."""
+    task = TASKS.get(job_id)
+    if task is None:
+        return
+    task.update({"status": "running", "started_at": time.time()})
+    task["progress"] = {"done": 0, "total": 0, "phase": "starting"}
+    try:
+        result = _upload_and_process_impl(
+            job_id, pdf_path, original_filename,
+            university_name, country, website, degree_title, degree_type,
+            save_to_db, translate, chunk_size, overlap, max_chars, split_mode,
+        )
+        task.update({
+            "status": "succeeded",
+            "finished_at": time.time(),
+            "result": result,
+        })
+        task["progress"] = {**task.get("progress", {}), "phase": "done"}
+        logger.info("[%s] upload_and_process finished", job_id)
+    except HTTPException as he:
+        task.update({"status": "failed", "finished_at": time.time(),
+                     "error": getattr(he, "detail", str(he))})
+        logger.exception("[%s] upload_and_process failed: %s", job_id, he)
+    except Exception as e:
+        task.update({"status": "failed", "finished_at": time.time(), "error": str(e)})
+        logger.exception("[%s] upload_and_process failed: %s", job_id, e)
+
+
+def _upload_and_process_impl(
+    job_id: str,
+    pdf_path: str,
+    original_filename: str,
+    university_name: Optional[str],
+    country: Optional[str],
+    website: Optional[str],
+    degree_title: Optional[str],
+    degree_type: Optional[str],
+    save_to_db: bool,
+    translate: bool,
+    chunk_size: int,
+    overlap: int,
+    max_chars: int,
+    split_mode: str,
+):
     full_text = _ensure_text(extract_text_from_pdf_best(pdf_path))
 
     pages = extract_text_from_pdf(pdf_path)
@@ -6267,7 +6379,7 @@ async def upload_pdf_and_process(
         uni_guess = re.sub(
             r"[_\W]+",
             " ",
-            os.path.splitext(file.filename)[0]
+            os.path.splitext(original_filename)[0]
         ).strip()
 
     meta = _find_uni_by_name(uni_guess)
@@ -6368,7 +6480,13 @@ async def upload_pdf_and_process(
         else:
             logger.info("Detected %d possible course blocks", len(blocks))
 
+        _task = TASKS.get(job_id)
+        if _task is not None:
+            _task["progress"] = {"done": 0, "total": len(blocks), "phase": "extracting_courses"}
+
         for i, block in enumerate(blocks):
+            if _task is not None:
+                _task["progress"] = {"done": i, "total": len(blocks), "phase": "extracting_courses"}
             logger.info(
                 "Extracting block %d/%d split_mode=%s chars=%d",
                 i + 1,
@@ -6417,6 +6535,13 @@ async def upload_pdf_and_process(
             file_hint=os.path.basename(pdf_path),
             fuzzy_threshold=88
         )
+
+        if _task is not None:
+            _task["progress"] = {
+                "done": len(blocks) if 'blocks' in locals() else 0,
+                "total": len(blocks) if 'blocks' in locals() else 0,
+                "phase": "merging",
+            }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"CurricuNLP pipeline failed: {e}")
 
@@ -6430,7 +6555,7 @@ async def upload_pdf_and_process(
             "domain": domain
         },
         "source_file": os.path.basename(pdf_path),
-        "original_filename": file.filename,
+        "original_filename": original_filename,
         "language": {
             "detected": detected_lang,
             "translated": bool(translate and detected_lang != "en")
@@ -6472,26 +6597,30 @@ async def upload_pdf_and_process(
         if not is_database_connected(DB_CONFIG):
             raise HTTPException(status_code=500, detail="Database connection failed.")
 
-        task_id = str(uuid4())
-        TASKS[task_id] = {
-            "status": "queued",
-            "queued_at": time.time(),
-            "type": "upload_pdf_and_process_save",
-            "source_file": os.path.basename(pdf_path),
-            "university_name": final_university_name
-        }
+        # We are already running in the background, so save synchronously here
+        # (rather than scheduling a further background task) and fold the result
+        # into this job's progress and payload.
+        if _task is not None:
+            _task["progress"] = {**_task.get("progress", {}), "phase": "saving_to_db"}
+        logger.info("[%s] Saving %d course(s) for %s", job_id,
+                    len(payload.get("courses", [])), final_university_name)
+        save_result = write_json_to_database(payload, DB_CONFIG)
+        payload["db_save"] = {"status": "succeeded", "result": save_result}
 
-        if background_tasks is None:
-            raise HTTPException(status_code=500, detail="BackgroundTasks is not available.")
-        background_tasks.add_task(_save_payload_task, task_id, payload, extract_skills=True)
+        # Same-step ESCO skill extraction for the newly created courses.
+        created_ids = (save_result or {}).get("created_course_ids") or []
+        if created_ids:
+            if _task is not None:
+                _task["progress"] = {**_task.get("progress", {}), "phase": "extracting_skills"}
+            logger.info("[%s] Extracting skills for %d newly saved course(s)", job_id, len(created_ids))
+            try:
+                skills_summary = _extract_skills_for_course_ids(created_ids)
+                payload["db_save"]["skills_extraction"] = skills_summary
+            except Exception as e:
+                logger.exception("[%s] Skill extraction failed: %s", job_id, e)
+                payload["db_save"]["skills_extraction_error"] = str(e)
 
-        payload["db_save"] = {
-            "status": "queued",
-            "task_id": task_id,
-            "note": "Poll /curriculum-skills/db/tasks/{task_id} for progress."
-        }
-
-    return JSONResponse(content=_json_safe(payload))
+    return _json_safe(payload)
 
 
 

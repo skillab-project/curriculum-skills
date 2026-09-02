@@ -21,6 +21,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - shared-net
 
   curriculum-skills:
     depends_on:
@@ -65,6 +67,8 @@ services:
       io.portainer.accesscontrol.teams: skillab-all
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - shared-net
       
 
 volumes:
@@ -80,3 +84,8 @@ volumes:
   skill-gap-longterm:
     labels:
       io.portainer.accesscontrol.teams: skillab-all
+
+networks:
+  shared-net:
+    external: true
+    name: shared-net
