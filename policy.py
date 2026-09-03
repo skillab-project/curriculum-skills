@@ -353,8 +353,19 @@ def get_run_status(run_id: str, db: Session = Depends(get_db)):
 @router.get("/policy/runs", summary="List all analysis runs with their filters")
 def list_runs(db: Session = Depends(get_db)):
     """Every analysis with its title, description, date, and filters."""
+    # Select only the columns this listing needs.
     rows = (
-        db.query(PolicyRecommendation)
+        db.query(
+            PolicyRecommendation.run_id,
+            PolicyRecommendation.title,
+            PolicyRecommendation.description,
+            PolicyRecommendation.analysis_date,
+            PolicyRecommendation.created_at,
+            PolicyRecommendation.occupations,
+            PolicyRecommendation.threshold,
+            PolicyRecommendation.top_n,
+            PolicyRecommendation.filter_country,
+        )
         .order_by(PolicyRecommendation.created_at.desc())
         .all()
     )
