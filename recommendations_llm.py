@@ -3,8 +3,15 @@
 # Reads saved analysis results (short-term / long-term / policy) from the DB and
 # can also fetch FTTI (Tsouk) trends live by title. Builds a compact evidence
 # summary, asks the Mistral LLM for curriculum recommendations (Markdown), and
-# CACHES the result in the DB keyed by the exact combination of titles (+ focus).
-# Same combo -> cached, no new LLM call.
+# CACHES the result in the DB keyed by the exact combination of titles (+ focus
+# + suggest_universities). Same combo -> cached, no new LLM call.
+#
+# University suggestions:
+#  - short-term / long-term: opt-in via suggest_universities=true -> queries the
+#    DB for OTHER universities/countries that teach the missing (gap) skills.
+#  - policy: always included -> the missing_courses (where the gap is taught
+#    elsewhere) are already stored by the policy engine, so they are read back
+#    and shown to the LLM with no extra query.
 # ==============================================================================
 import os
 import json
@@ -50,7 +57,7 @@ _RecBase = declarative_base()
 class LLMRecommendation(_RecBase):
     __tablename__ = "llm_recommendations"
     id = Column(Integer, primary_key=True, index=True)
-    combo_key = Column(String(64), nullable=False, unique=True, index=True)  # hash of titles+focus
+    combo_key = Column(String(64), nullable=False, unique=True, index=True)  # hash of titles+focus+suggest
     shortterm_title = Column(String(512), nullable=True)
     longterm_title = Column(String(512), nullable=True)
     policy_title = Column(String(512), nullable=True)
@@ -68,10 +75,12 @@ def _ensure_rec_schema():
 
 
 def _combo_key(st: Optional[str], lt: Optional[str], pol: Optional[str],
-               tsouk: Optional[str], focus: Optional[str]) -> str:
+               tsouk: Optional[str], focus: Optional[str],
+               suggest_unis: bool = False) -> str:
     raw = json.dumps({
         "st": st or "", "lt": lt or "", "pol": pol or "",
-        "tsouk": tsouk or "", "focus": (focus or "").strip()
+        "tsouk": tsouk or "", "focus": (focus or "").strip(),
+        "suggest_unis": bool(suggest_unis),
     }, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -113,6 +122,7 @@ def _read_shortterm(title: str) -> Optional[Dict[str, Any]]:
         first = rows[0]
         skills = [{
             "skill": r["skill_name"],
+            "skill_id": r["skill_id"],
             "gap_score": r["gap_score"],
             "in_curriculum": bool(r["in_curriculum"]),
         } for r in rows]
@@ -133,6 +143,8 @@ def _read_shortterm(title: str) -> Optional[Dict[str, Any]]:
             "total_skills": len(skills),
             "hot_skills": hot,
             "oversupplied_skills": oversupplied,
+            # urls of the HOT skills that are missing from curricula (for suggestions)
+            "missing_urls": [s["skill_id"] for s in hot if not s["in_curriculum"] and s["skill_id"]],
         }
     finally:
         if conn and conn.is_connected():
@@ -157,6 +169,7 @@ def _read_longterm(title: str) -> Optional[Dict[str, Any]]:
         first = rows[0]
         skills = [{
             "skill": r["skill_name"],
+            "skill_id": r["skill_id"],
             "technologies": _json_or_raw(r["technologies"]),
             "in_curriculum": bool(r["in_curriculum"]),
         } for r in rows]
@@ -172,6 +185,8 @@ def _read_longterm(title: str) -> Optional[Dict[str, Any]]:
             "total_skills": len(skills),
             "covered_skills": [s["skill"] for s in covered],
             "missing_skills": [s["skill"] for s in missing],
+            # urls of the missing skills (for suggestions)
+            "missing_urls": [s["skill_id"] for s in missing if s["skill_id"]],
         }
     finally:
         if conn and conn.is_connected():
@@ -187,7 +202,8 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
             SELECT title, description, analysis_date, filter_country,
                    threshold, top_n, occupations,
                    university_name, country, coverage_score,
-                   present_skills_count, missing_skills_count
+                   present_skills_count, missing_skills_count,
+                   missing_courses
             FROM policy_recommendations
             WHERE title = %s
             ORDER BY coverage_score DESC
@@ -202,6 +218,7 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
             "coverage_score": r["coverage_score"],
             "present": r["present_skills_count"],
             "missing": r["missing_skills_count"],
+            "missing_courses": _json_or_raw(r["missing_courses"]),
         } for r in rows]
         agg: Dict[str, List[float]] = {}
         for u in universities:
@@ -278,6 +295,59 @@ def _read_tsouk_trends(title: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _universities_teaching_skills(skill_urls: List[str],
+                                  exclude_country: Optional[str] = None,
+                                  limit_per_skill: int = 5) -> Dict[str, List[str]]:
+    """
+    For a list of ESCO skill urls, find which universities teach them (by
+    Skill.skill_url). Optionally EXCLUDE a country (e.g. the analysis country),
+    so it suggests OTHER universities/countries that cover the gap.
+    Returns: { skill_url: ["Course (University) - [Country]", ...] }
+    """
+    result: Dict[str, List[str]] = {}
+    if not skill_urls:
+        return result
+
+    conn = None
+    BATCH = 50
+    try:
+        conn = _conn()
+        cur = conn.cursor(dictionary=True)
+        ids = [u for u in skill_urls if u]
+        for i in range(0, len(ids), BATCH):
+            batch = ids[i:i + BATCH]
+            placeholders = ", ".join(["%s"] * len(batch))
+            params = list(batch)
+            country_clause = ""
+            if exclude_country and exclude_country.strip():
+                country_clause = " AND LOWER(u.country) NOT LIKE LOWER(%s)"
+                params.append(f"%{exclude_country.strip()}%")
+            cur.execute(f"""
+                SELECT s.skill_url, s.skill_name, c.lesson_name,
+                       u.university_name, u.country
+                FROM Skill s
+                JOIN CourseSkill cs ON s.skill_id = cs.skill_id
+                JOIN Course c ON cs.course_id = c.course_id
+                JOIN University u ON c.university_id = u.university_id
+                WHERE s.skill_url IN ({placeholders}){country_clause}
+                LIMIT 3000
+            """, params)
+            for r in cur.fetchall():
+                su = r["skill_url"].strip() if r.get("skill_url") else None
+                if not su:
+                    continue
+                entry = f"{r['lesson_name']} ({r['university_name']}) - [{r['country']}]"
+                lst = result.setdefault(su, [])
+                if entry not in lst and len(lst) < limit_per_skill:
+                    lst.append(entry)
+    except Exception as e:
+        logger.error(f"DB error in _universities_teaching_skills: {e}")
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+    return result
+
+
 # ==========================================
 # PROMPT BUILDING
 # ==========================================
@@ -310,10 +380,24 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
             top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in _trim(s["countries"], 10)]
             low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)[:10]
             low = [f"{u['university']} {u['coverage_score']}%" for u in low_unis]
+
+            # Where the gaps are already taught elsewhere (stored by the policy engine).
+            suggest_lines = []
+            for u in low_unis[:5]:
+                mc = u.get("missing_courses") or {}
+                if isinstance(mc, dict) and mc:
+                    for skill, courses in list(mc.items())[:5]:
+                        clist = courses[:3] if isinstance(courses, list) else []
+                        if clist:
+                            suggest_lines.append(f"    - '{skill}' taught at: {clist}")
+            suggest_block = ("\n  gap skills taught at OTHER universities:\n" +
+                             "\n".join(suggest_lines)) if suggest_lines else ""
+
             parts.append(
                 f"[POLICY] title='{s['title']}' occupations={s['filters'].get('occupations')}\n"
                 f"  coverage by country (avg): {top_countries}\n"
                 f"  lowest-coverage universities: {low}"
+                f"{suggest_block}"
             )
         elif s["type"] == "tsouk-trends":
             tech_lines = []
@@ -328,6 +412,36 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_university_suggestions(sources: List[Dict[str, Any]]) -> str:
+    """
+    For the missing (gap) skills of short-term / long-term analyses, find OTHER
+    universities that teach them (excluding the analysis country) and format as
+    evidence for the LLM. Policy already carries this info in its own block.
+    """
+    blocks = []
+    for s in sources:
+        if s["type"] not in ("short-term", "long-term"):
+            continue
+        missing_urls = s.get("missing_urls", [])
+        exclude_country = s["filters"].get("country")
+        if not missing_urls:
+            continue
+
+        teaching = _universities_teaching_skills(missing_urls, exclude_country=exclude_country)
+        if not teaching:
+            continue
+
+        lines = []
+        for url, courses in list(teaching.items())[:20]:
+            lines.append(f"    - {courses}")
+        block = "\n".join(lines)
+        blocks.append(
+            f"[SUGGESTED UNIVERSITIES for gap of '{s['title']}' "
+            f"(excluding {exclude_country})]\n{block}"
+        )
+    return "\n\n".join(blocks)
+
+
 _SYSTEM_INSTRUCTIONS = (
     "You are an education-policy analyst for the SKILLAB project. You are given the "
     "results of skill-gap analyses comparing labour-market demand and future technology "
@@ -337,20 +451,33 @@ _SYSTEM_INSTRUCTIONS = (
 )
 
 
-def _build_prompt(evidence: str, focus: Optional[str]) -> str:
+def _build_prompt(evidence: str, focus: Optional[str], uni_suggestions: str = "") -> str:
     focus_line = f"\nParticular focus requested: {focus}\n" if focus else ""
+    suggestions_block = ""
+    extra_section = ""
+    if uni_suggestions.strip():
+        suggestions_block = (
+            f"\nUNIVERSITIES TEACHING THE GAP SKILLS (candidates to learn from):\n"
+            f"{uni_suggestions}\n"
+        )
+        extra_section = (
+            "6. **Universities to look at** — based on the candidates above (and any "
+            "'gap skills taught at OTHER universities' in the policy block), which "
+            "universities/countries already teach the missing skills and could be models "
+            "or partners. Only use universities explicitly listed.\n"
+        )
     return f"""{_SYSTEM_INSTRUCTIONS}
 
 EVIDENCE FROM SAVED ANALYSES:
 {evidence}
-{focus_line}
+{suggestions_block}{focus_line}
 Write the recommendations as Markdown with these sections:
 1. **Summary** — 2-3 sentences on the overall picture.
 2. **Priority skills to add** — skills in demand / future-relevant but missing from curricula, with a one-line justification each.
 3. **Skills to de-emphasise** — oversupplied skills, if any.
 4. **University / country actions** — where coverage is weakest and what to do.
 5. **Concrete next steps** — 3-5 bullet actions.
-
+{extra_section}
 Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
 
@@ -384,6 +511,7 @@ class RecommendRequest(BaseModel):
     policy_title: Optional[str] = Field(None, description="Title of a saved policy analysis.")
     tsouk_title: Optional[str] = Field(None, description="FTTI trends analysis title (fetched live from the Tsouk API, no curricula).")
     focus: Optional[str] = Field(None, description="Optional extra instruction (e.g. 'focus on Greece').")
+    suggest_universities: bool = Field(False, description="For short-term/long-term: also suggest OTHER universities/countries that teach the gap (missing) skills. Policy always includes this from its stored data.")
     force_refresh: bool = Field(False, description="Ignore cache and regenerate with a new LLM call.")
 
 
@@ -396,9 +524,12 @@ def generate_recommendations(req: RecommendRequest):
     Give one or more titles: short-term / long-term / policy (read from the DB),
     and/or an FTTI trends title (fetched live from the Tsouk API). The evidence is
     summarised and sent to the Mistral LLM, which returns curriculum recommendations
-    in Markdown. The Markdown is CACHED in the DB keyed by the exact title
-    combination (+ focus): the same combo returns the cached Markdown with NO new
-    LLM call. Set force_refresh=true to regenerate.
+    in Markdown. With suggest_universities=true, short-term/long-term gaps are
+    enriched with OTHER universities that teach the missing skills (policy always
+    includes this from its stored missing_courses). The Markdown is CACHED in the
+    DB keyed by the exact title combination (+ focus + suggest_universities): the
+    same combo returns the cached Markdown with NO new LLM call. Set
+    force_refresh=true to regenerate.
     """
     _ensure_rec_schema()
 
@@ -408,7 +539,8 @@ def generate_recommendations(req: RecommendRequest):
             detail="Provide at least one of: shortterm_title, longterm_title, policy_title, tsouk_title."
         )
 
-    key = _combo_key(req.shortterm_title, req.longterm_title, req.policy_title, req.tsouk_title, req.focus)
+    key = _combo_key(req.shortterm_title, req.longterm_title, req.policy_title,
+                     req.tsouk_title, req.focus, req.suggest_universities)
 
     # 1) Cache hit?
     if not req.force_refresh:
@@ -439,7 +571,8 @@ def generate_recommendations(req: RecommendRequest):
         raise HTTPException(status_code=404, detail=f"No saved analyses found for: {', '.join(not_found)}.")
 
     evidence = _build_evidence(sources)
-    prompt = _build_prompt(evidence, req.focus)
+    uni_suggestions = _build_university_suggestions(sources) if req.suggest_universities else ""
+    prompt = _build_prompt(evidence, req.focus, uni_suggestions)
 
     # 3) LLM call
     try:
@@ -481,6 +614,7 @@ def generate_recommendations(req: RecommendRequest):
         "used_analyses": [{"type": s["type"], "title": s["title"]} for s in sources],
         "not_found": not_found,
         "focus": req.focus,
+        "suggest_universities": req.suggest_universities,
         "recommendations": recommendations_md,
     }
 
@@ -511,8 +645,9 @@ def preview_evidence(
     longterm_title: Optional[str] = Query(None),
     policy_title: Optional[str] = Query(None),
     tsouk_title: Optional[str] = Query(None),
+    suggest_universities: bool = Query(False),
 ):
-    """Debug helper: shows the evidence block without calling the LLM."""
+    """Debug helper: shows the evidence block (and optional university suggestions) without calling the LLM."""
     sources, not_found = _collect_sources(shortterm_title, longterm_title, policy_title, tsouk_title)
     if not sources:
         raise HTTPException(status_code=404, detail=f"No saved analyses found for: {', '.join(not_found)}.")
@@ -520,4 +655,5 @@ def preview_evidence(
         "used_analyses": [{"type": s["type"], "title": s["title"]} for s in sources],
         "not_found": not_found,
         "evidence": _build_evidence(sources),
+        "university_suggestions": _build_university_suggestions(sources) if suggest_universities else "",
     }
