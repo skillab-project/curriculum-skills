@@ -192,7 +192,6 @@ def _read_longterm(title: str) -> Optional[Dict[str, Any]]:
         if conn and conn.is_connected():
             conn.close()
 
-
 def _read_policy(title: str) -> Optional[Dict[str, Any]]:
     conn = None
     try:
@@ -212,6 +211,15 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
         if not rows:
             return None
         first = rows[0]
+        filter_country = first["filter_country"]
+
+        # Scope to the analysis' filter_country if one was set.
+        if filter_country and filter_country.strip():
+            fc = filter_country.strip().lower()
+            scoped = [r for r in rows if (r["country"] or "").strip().lower().find(fc) != -1]
+            if scoped:
+                rows = scoped
+
         universities = [{
             "university": r["university_name"],
             "country": r["country"],
@@ -235,7 +243,7 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
             "description": first["description"],
             "date": str(first["analysis_date"]) if first["analysis_date"] else None,
             "filters": {
-                "country": first["filter_country"],
+                "country": filter_country,
                 "threshold": first["threshold"], "top_n": first["top_n"],
                 "occupations": _json_or_raw(first["occupations"]),
             },
@@ -245,7 +253,6 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
     finally:
         if conn and conn.is_connected():
             conn.close()
-
 
 def _read_tsouk_trends(title: str) -> Optional[Dict[str, Any]]:
     """
