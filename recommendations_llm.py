@@ -781,6 +781,47 @@ def list_recommendations():
     finally:
         db.close()
 
+@router.delete("/delete", summary="Delete a cached recommendation by id or by the same inputs")
+def delete_recommendation(
+    id: Optional[int] = Query(None, description="Delete by row id (from /list)."),
+    shortterm_title: Optional[str] = Query(None),
+    longterm_title: Optional[str] = Query(None),
+    policy_title: Optional[str] = Query(None),
+    tsouk_title: Optional[str] = Query(None),
+    focus: Optional[str] = Query(None),
+    suggest_universities: bool = Query(False),
+    policy_country: Optional[str] = Query(None),
+):
+    """
+    Delete a saved recommendation. Provide either:
+    - `id` (from /list), OR
+    - the same inputs used to generate it (matched by combo_key).
+    After deleting, the next /generate for those inputs will run fresh.
+    """
+    _ensure_rec_schema()
+    db = _RecSession()
+    try:
+        if id is not None:
+            row = db.query(LLMRecommendation).filter(LLMRecommendation.id == id).first()
+        else:
+            if not (shortterm_title or longterm_title or policy_title or tsouk_title):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide `id`, or at least one of: shortterm_title, longterm_title, policy_title, tsouk_title."
+                )
+            key = _combo_key(shortterm_title, longterm_title, policy_title,
+                             tsouk_title, focus, suggest_universities, policy_country)
+            row = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == key).first()
+
+        if not row:
+            return {"deleted": False, "message": "No matching recommendation found."}
+
+        deleted_id = row.id
+        db.delete(row)
+        db.commit()
+        return {"deleted": True, "id": deleted_id}
+    finally:
+        db.close()
 
 @router.get("/preview", summary="Preview the evidence that would be sent to the LLM (no LLM call)")
 def preview_evidence(
