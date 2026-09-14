@@ -15,7 +15,10 @@
 #  - Once a country is in effect, ONLY that country's universities are kept
 #    (no leaking of other countries even if the result is empty).
 #
-# Policy-only requests use a SHORTER prompt: Summary + universities for the country.
+# Policy-only requests use a SHORTER prompt: Summary + universities for the
+# target country. The prompt makes clear the TARGET country is the one being
+# improved, and any other countries are only models where the gap skills are
+# already taught.
 # ==============================================================================
 import os
 import json
@@ -428,14 +431,14 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
                         clist = courses[:3] if isinstance(courses, list) else []
                         if clist:
                             suggest_lines.append(f"    - '{skill}' taught at: {clist}")
-            suggest_block = ("\n  gap skills taught at OTHER universities:\n" +
+            suggest_block = ("\n  gap skills taught at OTHER (model) universities:\n" +
                              "\n".join(suggest_lines)) if suggest_lines else ""
 
             parts.append(
-                f"[POLICY] title='{s['title']}' country={country} "
+                f"[POLICY] TARGET_COUNTRY={country} title='{s['title']}' "
                 f"occupations={s['filters'].get('occupations')}\n"
-                f"  coverage by country (avg): {top_countries}\n"
-                f"  lowest-coverage universities: {low}"
+                f"  coverage in TARGET country (avg): {top_countries}\n"
+                f"  lowest-coverage universities IN {country}: {low}"
                 f"{suggest_block}"
             )
         elif s["type"] == "tsouk-trends":
@@ -501,7 +504,7 @@ def _build_prompt(evidence: str, focus: Optional[str], uni_suggestions: str = ""
         )
         extra_section = (
             "6. **Universities to look at** — based on the candidates above (and any "
-            "'gap skills taught at OTHER universities' in the policy block), which "
+            "'gap skills taught at OTHER (model) universities' in the policy block), which "
             "universities/countries already teach the missing skills and could be models "
             "or partners. Only use universities explicitly listed.\n"
         )
@@ -522,21 +525,31 @@ Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
 def _build_policy_prompt(evidence: str, focus: Optional[str], country: Optional[str]) -> str:
     """
-    Shorter prompt used when the ONLY source is a policy analysis. Produces just
-    a Summary and university suggestions for the analysis' country.
+    Shorter prompt used when the ONLY source is a policy analysis. The TARGET
+    country is the one to improve; any other countries in the evidence are ONLY
+    models where the gap skills are already taught — never the subject of the
+    recommendations.
     """
     focus_line = f"\nParticular focus requested: {focus}\n" if focus else ""
-    country_line = f" for {country}" if country else ""
+    target = country or "the target country"
     return f"""{_SYSTEM_INSTRUCTIONS}
+
+CRITICAL CONTEXT:
+- The TARGET country of this analysis is: {target}.
+- ALL recommendations must be about universities IN {target} ONLY.
+- The evidence may mention universities in OTHER countries. Those appear ONLY
+  because they already teach a gap skill — they are MODELS to learn from, NOT
+  the subject of the recommendations. NEVER tell a university outside {target}
+  to change anything.
 
 EVIDENCE FROM THE POLICY ANALYSIS:
 {evidence}
 {focus_line}
-Write the recommendations as Markdown with EXACTLY these two sections{country_line}:
-1. **Summary** — 2-3 sentences on the coverage picture for the country's universities.
-2. **Universities to strengthen** — for each low-coverage university in the country, name the specific gap skills it should add and, where the evidence lists them, which OTHER universities already teach those skills (from 'gap skills taught at OTHER universities'). Only use universities and skills explicitly present in the evidence.
+Write the recommendations as Markdown with EXACTLY these two sections:
+1. **Summary** — 2-3 sentences on the coverage picture for {target}'s universities.
+2. **Universities to strengthen in {target}** — for each low-coverage university IN {target}, list the specific gap skills it should add. For each gap skill, if the evidence's 'gap skills taught at OTHER (model) universities' names a university (in any country) that already teaches it, cite that university as a model to learn from. Only recommend CHANGES to universities in {target}; other universities are cited only as models.
 
-Do NOT add any other sections. Keep it grounded strictly in the evidence above. Output valid Markdown only."""
+Do NOT add any other sections. Do NOT recommend changes to universities outside {target}. Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
 
 # ==========================================
@@ -584,8 +597,9 @@ def generate_recommendations(req: RecommendRequest):
     Give one or more titles: short-term / long-term / policy (read from the DB),
     and/or an FTTI trends title (fetched live from the Tsouk API). Use policy_country
     to force the policy scope to one country. When ONLY policy_title is given, a
-    shorter prompt is used: Summary + universities for the country. The Markdown is
-    CACHED keyed by the exact title combination (+ focus + suggest_universities +
+    shorter prompt is used: Summary + universities to strengthen in the target
+    country (other countries are cited only as models). The Markdown is CACHED
+    keyed by the exact title combination (+ focus + suggest_universities +
     policy_country). Set force_refresh=true to regenerate.
     """
     _ensure_rec_schema()
@@ -630,7 +644,7 @@ def generate_recommendations(req: RecommendRequest):
 
     evidence = _build_evidence(sources)
 
-    # Policy-only analyses get a shorter prompt: Summary + university suggestions.
+    # Policy-only analyses get a shorter, target-country-focused prompt.
     is_policy_only = (len(sources) == 1 and sources[0]["type"] == "policy")
     if is_policy_only:
         policy_country = sources[0]["filters"].get("country")
