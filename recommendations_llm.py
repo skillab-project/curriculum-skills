@@ -1,24 +1,10 @@
 # ==============================================================================
 # LLM RECOMMENDATIONS
-# Reads saved analysis results (short-term / long-term / policy) from the DB and
-# can also fetch FTTI (Tsouk) trends live by title. Builds a compact evidence
-# summary, asks the Mistral LLM for curriculum recommendations (Markdown), and
-# CACHES the result in the DB keyed by the exact combination of titles (+ focus
-# + suggest_universities + policy_country). Same combo -> cached, no new LLM call.
-#
-# University suggestions:
-#  - short-term / long-term: opt-in via suggest_universities=true.
-#  - policy: always included from stored missing_courses.
-#
-# Policy scoping:
-#  - policy_country (request) overrides the analysis' stored filter_country.
-#  - Once a country is in effect, ONLY that country's universities are kept
-#    (no leaking of other countries even if the result is empty).
-#
-# Policy-only requests use a SHORTER prompt: Summary + universities for the
-# target country. The prompt makes clear the TARGET country is the one being
-# improved, and any other countries are only models where the gap skills are
-# already taught.
+# Background generation: /generate starts a task and returns immediately. The
+# LLM runs in a background thread (so nginx/gateway timeouts don't kill it).
+# Status is tracked in the DB (running / completed / failed). Asking for the same
+# combo while it runs returns "running"; once done it is stored and served from
+# cache. Keyed by titles + focus + suggest_universities + policy_country.
 # ==============================================================================
 import os
 import json
@@ -28,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 import mysql.connector
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, TIMESTAMP, text as sa_text
@@ -65,13 +51,24 @@ class LLMRecommendation(_RecBase):
     __tablename__ = "llm_recommendations"
     id = Column(Integer, primary_key=True, index=True)
     combo_key = Column(String(64), nullable=False, unique=True, index=True)  # hash of titles+focus+suggest+country
+    status = Column(String(20), nullable=True, index=True)   # running | completed | failed
+    error = Column(String(2048), nullable=True)
     shortterm_title = Column(String(512), nullable=True)
     longterm_title = Column(String(512), nullable=True)
     policy_title = Column(String(512), nullable=True)
     tsouk_title = Column(String(512), nullable=True)
+    policy_country = Column(String(255), nullable=True)
     focus = Column(String(1024), nullable=True)
     recommendations_md = Column(Text, nullable=True)   # the Markdown result
     created_at = Column(TIMESTAMP, server_default=sa_text("CURRENT_TIMESTAMP"))
+
+
+# ---- schema self-migration (adds status/error/policy_country on old DBs) ----
+_REC_COLUMNS = {
+    "status": "VARCHAR(20) NULL",
+    "error": "VARCHAR(2048) NULL",
+    "policy_country": "VARCHAR(255) NULL",
+}
 
 
 def _ensure_rec_schema():
@@ -79,6 +76,32 @@ def _ensure_rec_schema():
         _RecBase.metadata.create_all(bind=_rec_engine)
     except Exception as e:
         logger.error(f"llm_recommendations create_all failed: {e}")
+        return
+    try:
+        with _rec_engine.begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(sa_text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'llm_recommendations'"
+                ))
+            }
+            if not existing:
+                return
+            for col, ddl in _REC_COLUMNS.items():
+                if col not in existing:
+                    logger.warning("Adding missing column llm_recommendations.%s", col)
+                    conn.execute(sa_text(f"ALTER TABLE llm_recommendations ADD COLUMN {col} {ddl}"))
+                    if col == "status":
+                        try:
+                            conn.execute(sa_text(
+                                "CREATE INDEX idx_rec_status ON llm_recommendations (status)"
+                            ))
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.error(f"llm_recommendations column migration failed: {e}")
 
 
 def _combo_key(st: Optional[str], lt: Optional[str], pol: Optional[str],
@@ -201,10 +224,9 @@ def _read_longterm(title: str) -> Optional[Dict[str, Any]]:
 
 def _read_policy(title: str, country_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Read a policy analysis by title. The country scope is: country_override (from
-    the request) if given, else the stored filter_country. Once a country is in
-    effect, ONLY that country's universities are kept — even if the result is
-    empty (so other countries never leak into the evidence).
+    Read a policy analysis by title. Country scope: country_override (request) if
+    given, else stored filter_country. Once a country is in effect, ONLY that
+    country's universities are kept — even if empty (no leaking of other countries).
     """
     conn = None
     try:
@@ -283,11 +305,7 @@ def _read_policy(title: str, country_override: Optional[str] = None) -> Optional
 
 
 def _read_tsouk_trends(title: str) -> Optional[Dict[str, Any]]:
-    """
-    Live fetch from the FTTI (Tsouk) API: GET /policies/by-title/{title}.
-    Extracts the distinct skills + technologies for that trends analysis.
-    No curriculum comparison — pure trends/skills evidence.
-    """
+    """Live fetch from the FTTI (Tsouk) API: GET /policies/by-title/{title}."""
     try:
         resp = requests.get(
             f"{TRENDS_BASE_URL}/policies/by-title/{requests.utils.quote(title)}",
@@ -333,12 +351,7 @@ def _read_tsouk_trends(title: str) -> Optional[Dict[str, Any]]:
 def _universities_teaching_skills(skill_urls: List[str],
                                   exclude_country: Optional[str] = None,
                                   limit_per_skill: int = 5) -> Dict[str, List[str]]:
-    """
-    For a list of ESCO skill urls, find which universities teach them (by
-    Skill.skill_url). Optionally EXCLUDE a country (e.g. the analysis country),
-    so it suggests OTHER universities/countries that cover the gap.
-    Returns: { skill_url: ["Course (University) - [Country]", ...] }
-    """
+    """For ESCO skill urls, find which universities teach them; optionally exclude a country."""
     result: Dict[str, List[str]] = {}
     if not skill_urls:
         return result
@@ -419,16 +432,16 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
                     f"  {s.get('empty_reason', 'No universities for this country in the analysis.')}"
                 )
                 continue
-            top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in _trim(s["countries"], 10)]
-            low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)[:10]
+            top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in _trim(s["countries"], 5)]
+            low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)[:5]
             low = [f"{u['university']} {u['coverage_score']}%" for u in low_unis]
 
             suggest_lines = []
-            for u in low_unis[:5]:
+            for u in low_unis[:3]:
                 mc = u.get("missing_courses") or {}
                 if isinstance(mc, dict) and mc:
-                    for skill, courses in list(mc.items())[:5]:
-                        clist = courses[:3] if isinstance(courses, list) else []
+                    for skill, courses in list(mc.items())[:3]:
+                        clist = courses[:2] if isinstance(courses, list) else []
                         if clist:
                             suggest_lines.append(f"    - '{skill}' taught at: {clist}")
             suggest_block = ("\n  gap skills taught at OTHER (model) universities:\n" +
@@ -455,11 +468,6 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
 
 
 def _build_university_suggestions(sources: List[Dict[str, Any]]) -> str:
-    """
-    For the missing (gap) skills of short-term / long-term analyses, find OTHER
-    universities that teach them (excluding the analysis country) and format as
-    evidence for the LLM. Policy already carries this info in its own block.
-    """
     blocks = []
     for s in sources:
         if s["type"] not in ("short-term", "long-term"):
@@ -468,11 +476,9 @@ def _build_university_suggestions(sources: List[Dict[str, Any]]) -> str:
         exclude_country = s["filters"].get("country")
         if not missing_urls:
             continue
-
         teaching = _universities_teaching_skills(missing_urls, exclude_country=exclude_country)
         if not teaching:
             continue
-
         lines = []
         for url, courses in list(teaching.items())[:20]:
             lines.append(f"    - {courses}")
@@ -524,12 +530,6 @@ Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
 
 def _build_policy_prompt(evidence: str, focus: Optional[str], country: Optional[str]) -> str:
-    """
-    Shorter prompt used when the ONLY source is a policy analysis. The TARGET
-    country is the one to improve; any other countries in the evidence are ONLY
-    models where the gap skills are already taught — never the subject of the
-    recommendations.
-    """
     focus_line = f"\nParticular focus requested: {focus}\n" if focus else ""
     target = country or "the target country"
     return f"""{_SYSTEM_INSTRUCTIONS}
@@ -575,6 +575,64 @@ def _collect_sources(st: Optional[str], lt: Optional[str], pol: Optional[str],
 
 
 # ==========================================
+# BACKGROUND WORKER
+# ==========================================
+def _run_generation(combo_key: str, req_data: Dict[str, Any]):
+    """Runs in a background thread: build prompt, call LLM, store result."""
+    try:
+        sources, not_found = _collect_sources(
+            req_data["shortterm_title"], req_data["longterm_title"],
+            req_data["policy_title"], req_data["tsouk_title"],
+            policy_country=req_data["policy_country"]
+        )
+        if not sources:
+            _mark_failed(combo_key, f"No saved analyses found for: {', '.join(not_found)}.")
+            return
+
+        evidence = _build_evidence(sources)
+        is_policy_only = (len(sources) == 1 and sources[0]["type"] == "policy")
+        if is_policy_only:
+            policy_country = sources[0]["filters"].get("country")
+            prompt = _build_policy_prompt(evidence, req_data["focus"], policy_country)
+        else:
+            uni_suggestions = (_build_university_suggestions(sources)
+                               if req_data["suggest_universities"] else "")
+            prompt = _build_prompt(evidence, req_data["focus"], uni_suggestions)
+
+        recommendations_md = chat_generate(prompt, temperature=0.2)
+        _mark_completed(combo_key, recommendations_md)
+        logger.info(f"Recommendation completed for combo_key={combo_key[:12]}...")
+    except Exception as e:
+        logger.exception("Background generation failed")
+        _mark_failed(combo_key, str(e)[:2000])
+
+
+def _mark_completed(combo_key: str, md: str):
+    db = _RecSession()
+    try:
+        row = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == combo_key).first()
+        if row:
+            row.status = "completed"
+            row.error = None
+            row.recommendations_md = md
+            db.commit()
+    finally:
+        db.close()
+
+
+def _mark_failed(combo_key: str, error: str):
+    db = _RecSession()
+    try:
+        row = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == combo_key).first()
+        if row:
+            row.status = "failed"
+            row.error = error
+            db.commit()
+    finally:
+        db.close()
+
+
+# ==========================================
 # REQUEST SCHEMA
 # ==========================================
 class RecommendRequest(BaseModel):
@@ -585,22 +643,21 @@ class RecommendRequest(BaseModel):
     focus: Optional[str] = Field(None, description="Optional extra instruction (e.g. 'focus on Greece').")
     suggest_universities: bool = Field(False, description="For short-term/long-term: also suggest OTHER universities/countries that teach the gap (missing) skills. Policy always includes this from its stored data.")
     policy_country: Optional[str] = Field(None, description="Override the country scope for the policy analysis (keeps only universities of this country).")
-    force_refresh: bool = Field(False, description="Ignore cache and regenerate with a new LLM call.")
+    force_refresh: bool = Field(False, description="Ignore cache and regenerate.")
 
 
 # ==========================================
 # ENDPOINTS
 # ==========================================
-@router.post("/generate", summary="Generate (or return cached) LLM recommendations from saved analyses / FTTI trends")
-def generate_recommendations(req: RecommendRequest):
+@router.post("/generate", summary="Start (or fetch) LLM recommendations — runs in the background")
+def generate_recommendations(req: RecommendRequest, background_tasks: BackgroundTasks):
     """
-    Give one or more titles: short-term / long-term / policy (read from the DB),
-    and/or an FTTI trends title (fetched live from the Tsouk API). Use policy_country
-    to force the policy scope to one country. When ONLY policy_title is given, a
-    shorter prompt is used: Summary + universities to strengthen in the target
-    country (other countries are cited only as models). The Markdown is CACHED
-    keyed by the exact title combination (+ focus + suggest_universities +
-    policy_country). Set force_refresh=true to regenerate.
+    Starts generation in the BACKGROUND and returns immediately.
+    - If this exact combination is already COMPLETED (and not force_refresh),
+      the stored Markdown is returned right away (status=completed).
+    - If it is already RUNNING, returns status=running ("your analysis is running").
+    - Otherwise it is queued: returns status=running; poll /status or call
+      /generate again later to get the result once completed.
     """
     _ensure_rec_schema()
 
@@ -613,105 +670,111 @@ def generate_recommendations(req: RecommendRequest):
     key = _combo_key(req.shortterm_title, req.longterm_title, req.policy_title,
                      req.tsouk_title, req.focus, req.suggest_universities, req.policy_country)
 
-    # 1) Cache hit?
-    if not req.force_refresh:
-        db = _RecSession()
-        try:
-            cached = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == key).first()
-            if cached:
-                return {
-                    "cached": True,
-                    "used_analyses": {
-                        "shortterm_title": cached.shortterm_title,
-                        "longterm_title": cached.longterm_title,
-                        "policy_title": cached.policy_title,
-                        "tsouk_title": cached.tsouk_title,
-                    },
-                    "focus": cached.focus,
-                    "created_at": cached.created_at,
-                    "recommendations": cached.recommendations_md,
-                }
-        finally:
-            db.close()
-
-    # 2) Collect evidence
-    sources, not_found = _collect_sources(
-        req.shortterm_title, req.longterm_title, req.policy_title, req.tsouk_title,
-        policy_country=req.policy_country
-    )
-    if not sources:
-        raise HTTPException(status_code=404, detail=f"No saved analyses found for: {', '.join(not_found)}.")
-
-    evidence = _build_evidence(sources)
-
-    # Policy-only analyses get a shorter, target-country-focused prompt.
-    is_policy_only = (len(sources) == 1 and sources[0]["type"] == "policy")
-    if is_policy_only:
-        policy_country = sources[0]["filters"].get("country")
-        prompt = _build_policy_prompt(evidence, req.focus, policy_country)
-    else:
-        uni_suggestions = _build_university_suggestions(sources) if req.suggest_universities else ""
-        prompt = _build_prompt(evidence, req.focus, uni_suggestions)
-
-    # 3) LLM call
-    try:
-        recommendations_md = chat_generate(prompt, temperature=0.2)
-    except Exception as e:
-        logger.exception("LLM call failed")
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
-
-    # 4) Save/refresh cache
     db = _RecSession()
     try:
         existing = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == key).first()
+
+        if existing and not req.force_refresh:
+            if existing.status == "completed":
+                return {
+                    "status": "completed",
+                    "cached": True,
+                    "created_at": existing.created_at,
+                    "recommendations": existing.recommendations_md,
+                }
+            if existing.status == "running":
+                return {
+                    "status": "running",
+                    "message": "Your analysis is already running. Check back shortly.",
+                }
+            # failed -> allow a retry below
+
+        # Create or reset the row to 'running'
         if existing:
-            existing.recommendations_md = recommendations_md
+            existing.status = "running"
+            existing.error = None
+            existing.recommendations_md = None
             existing.shortterm_title = req.shortterm_title
             existing.longterm_title = req.longterm_title
             existing.policy_title = req.policy_title
             existing.tsouk_title = req.tsouk_title
+            existing.policy_country = req.policy_country
             existing.focus = req.focus
         else:
             db.add(LLMRecommendation(
                 combo_key=key,
+                status="running",
                 shortterm_title=req.shortterm_title,
                 longterm_title=req.longterm_title,
                 policy_title=req.policy_title,
                 tsouk_title=req.tsouk_title,
+                policy_country=req.policy_country,
                 focus=req.focus,
-                recommendations_md=recommendations_md,
+                recommendations_md=None,
             ))
         db.commit()
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to cache recommendation: {e}")
     finally:
         db.close()
 
-    return {
-        "cached": False,
-        "used_analyses": [{"type": s["type"], "title": s["title"]} for s in sources],
-        "not_found": not_found,
+    # Kick off the background generation (runs after the response is sent).
+    req_data = {
+        "shortterm_title": req.shortterm_title,
+        "longterm_title": req.longterm_title,
+        "policy_title": req.policy_title,
+        "tsouk_title": req.tsouk_title,
         "focus": req.focus,
         "suggest_universities": req.suggest_universities,
         "policy_country": req.policy_country,
-        "recommendations": recommendations_md,
+    }
+    background_tasks.add_task(_run_generation, key, req_data)
+
+    return {
+        "status": "running",
+        "message": "Analysis started. It runs in the background; check back shortly for the result.",
     }
 
 
-@router.get("/list", summary="List all cached recommendations")
+@router.post("/status", summary="Check the status/result of a recommendation (by the same inputs)")
+def recommendation_status(req: RecommendRequest):
+    """
+    Returns the status for the SAME combination of inputs:
+    - completed -> includes the recommendations Markdown
+    - running   -> still generating
+    - failed    -> includes the error
+    - not_found -> nothing started for this combination
+    """
+    _ensure_rec_schema()
+    key = _combo_key(req.shortterm_title, req.longterm_title, req.policy_title,
+                     req.tsouk_title, req.focus, req.suggest_universities, req.policy_country)
+    db = _RecSession()
+    try:
+        row = db.query(LLMRecommendation).filter(LLMRecommendation.combo_key == key).first()
+        if not row:
+            return {"status": "not_found", "message": "No recommendation started for these inputs."}
+        if row.status == "completed":
+            return {"status": "completed", "created_at": row.created_at,
+                    "recommendations": row.recommendations_md}
+        if row.status == "failed":
+            return {"status": "failed", "error": row.error}
+        return {"status": "running", "message": "Your analysis is running."}
+    finally:
+        db.close()
+
+
+@router.get("/list", summary="List all recommendations with their status")
 def list_recommendations():
-    """List saved recommendations with their title combinations and dates."""
     _ensure_rec_schema()
     db = _RecSession()
     try:
         rows = db.query(LLMRecommendation).order_by(LLMRecommendation.created_at.desc()).all()
         return {"recommendations": [{
             "id": r.id,
+            "status": r.status,
             "shortterm_title": r.shortterm_title,
             "longterm_title": r.longterm_title,
             "policy_title": r.policy_title,
             "tsouk_title": r.tsouk_title,
+            "policy_country": r.policy_country,
             "focus": r.focus,
             "created_at": r.created_at,
         } for r in rows]}
@@ -728,7 +791,7 @@ def preview_evidence(
     suggest_universities: bool = Query(False),
     policy_country: Optional[str] = Query(None),
 ):
-    """Debug helper: shows the evidence block (and optional university suggestions) without calling the LLM."""
+    """Debug helper: shows the evidence block without calling the LLM."""
     sources, not_found = _collect_sources(shortterm_title, longterm_title, policy_title,
                                           tsouk_title, policy_country=policy_country)
     if not sources:
