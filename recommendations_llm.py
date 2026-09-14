@@ -4,14 +4,18 @@
 # can also fetch FTTI (Tsouk) trends live by title. Builds a compact evidence
 # summary, asks the Mistral LLM for curriculum recommendations (Markdown), and
 # CACHES the result in the DB keyed by the exact combination of titles (+ focus
-# + suggest_universities). Same combo -> cached, no new LLM call.
+# + suggest_universities + policy_country). Same combo -> cached, no new LLM call.
 #
 # University suggestions:
-#  - short-term / long-term: opt-in via suggest_universities=true -> queries the
-#    DB for OTHER universities/countries that teach the missing (gap) skills.
-#  - policy: always included -> the missing_courses (where the gap is taught
-#    elsewhere) are already stored by the policy engine, so they are read back
-#    and shown to the LLM with no extra query.
+#  - short-term / long-term: opt-in via suggest_universities=true.
+#  - policy: always included from stored missing_courses.
+#
+# Policy scoping:
+#  - policy_country (request) overrides the analysis' stored filter_country.
+#  - Once a country is in effect, ONLY that country's universities are kept
+#    (no leaking of other countries even if the result is empty).
+#
+# Policy-only requests use a SHORTER prompt: Summary + universities for the country.
 # ==============================================================================
 import os
 import json
@@ -57,7 +61,7 @@ _RecBase = declarative_base()
 class LLMRecommendation(_RecBase):
     __tablename__ = "llm_recommendations"
     id = Column(Integer, primary_key=True, index=True)
-    combo_key = Column(String(64), nullable=False, unique=True, index=True)  # hash of titles+focus+suggest
+    combo_key = Column(String(64), nullable=False, unique=True, index=True)  # hash of titles+focus+suggest+country
     shortterm_title = Column(String(512), nullable=True)
     longterm_title = Column(String(512), nullable=True)
     policy_title = Column(String(512), nullable=True)
@@ -76,11 +80,12 @@ def _ensure_rec_schema():
 
 def _combo_key(st: Optional[str], lt: Optional[str], pol: Optional[str],
                tsouk: Optional[str], focus: Optional[str],
-               suggest_unis: bool = False) -> str:
+               suggest_unis: bool = False, policy_country: Optional[str] = None) -> str:
     raw = json.dumps({
         "st": st or "", "lt": lt or "", "pol": pol or "",
         "tsouk": tsouk or "", "focus": (focus or "").strip(),
         "suggest_unis": bool(suggest_unis),
+        "policy_country": (policy_country or "").strip(),
     }, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -143,7 +148,6 @@ def _read_shortterm(title: str) -> Optional[Dict[str, Any]]:
             "total_skills": len(skills),
             "hot_skills": hot,
             "oversupplied_skills": oversupplied,
-            # urls of the HOT skills that are missing from curricula (for suggestions)
             "missing_urls": [s["skill_id"] for s in hot if not s["in_curriculum"] and s["skill_id"]],
         }
     finally:
@@ -185,14 +189,20 @@ def _read_longterm(title: str) -> Optional[Dict[str, Any]]:
             "total_skills": len(skills),
             "covered_skills": [s["skill"] for s in covered],
             "missing_skills": [s["skill"] for s in missing],
-            # urls of the missing skills (for suggestions)
             "missing_urls": [s["skill_id"] for s in missing if s["skill_id"]],
         }
     finally:
         if conn and conn.is_connected():
             conn.close()
 
-def _read_policy(title: str) -> Optional[Dict[str, Any]]:
+
+def _read_policy(title: str, country_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Read a policy analysis by title. The country scope is: country_override (from
+    the request) if given, else the stored filter_country. Once a country is in
+    effect, ONLY that country's universities are kept — even if the result is
+    empty (so other countries never leak into the evidence).
+    """
     conn = None
     try:
         conn = _conn()
@@ -211,14 +221,28 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
         if not rows:
             return None
         first = rows[0]
-        filter_country = first["filter_country"]
 
-        # Scope to the analysis' filter_country if one was set.
-        if filter_country and filter_country.strip():
-            fc = filter_country.strip().lower()
-            scoped = [r for r in rows if (r["country"] or "").strip().lower().find(fc) != -1]
-            if scoped:
-                rows = scoped
+        effective_country = (country_override or first["filter_country"] or "").strip()
+
+        if effective_country:
+            fc = effective_country.lower()
+            rows = [r for r in rows if fc in (r["country"] or "").strip().lower()]
+
+        if not rows:
+            return {
+                "type": "policy",
+                "title": first["title"],
+                "description": first["description"],
+                "date": str(first["analysis_date"]) if first["analysis_date"] else None,
+                "filters": {
+                    "country": effective_country or None,
+                    "threshold": first["threshold"], "top_n": first["top_n"],
+                    "occupations": _json_or_raw(first["occupations"]),
+                },
+                "universities": [],
+                "countries": [],
+                "empty_reason": f"No universities found for country '{effective_country}' in this analysis.",
+            }
 
         universities = [{
             "university": r["university_name"],
@@ -243,7 +267,7 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
             "description": first["description"],
             "date": str(first["analysis_date"]) if first["analysis_date"] else None,
             "filters": {
-                "country": filter_country,
+                "country": effective_country or None,
                 "threshold": first["threshold"], "top_n": first["top_n"],
                 "occupations": _json_or_raw(first["occupations"]),
             },
@@ -253,6 +277,7 @@ def _read_policy(title: str) -> Optional[Dict[str, Any]]:
     finally:
         if conn and conn.is_connected():
             conn.close()
+
 
 def _read_tsouk_trends(title: str) -> Optional[Dict[str, Any]]:
     """
@@ -384,11 +409,17 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
                 f"  future skills MISSING from curricula: {_trim(s['missing_skills'], 20)}"
             )
         elif s["type"] == "policy":
+            country = s["filters"].get("country")
+            if not s.get("universities"):
+                parts.append(
+                    f"[POLICY] title='{s['title']}' country={country}\n"
+                    f"  {s.get('empty_reason', 'No universities for this country in the analysis.')}"
+                )
+                continue
             top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in _trim(s["countries"], 10)]
             low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)[:10]
             low = [f"{u['university']} {u['coverage_score']}%" for u in low_unis]
 
-            # Where the gaps are already taught elsewhere (stored by the policy engine).
             suggest_lines = []
             for u in low_unis[:5]:
                 mc = u.get("missing_courses") or {}
@@ -401,7 +432,8 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
                              "\n".join(suggest_lines)) if suggest_lines else ""
 
             parts.append(
-                f"[POLICY] title='{s['title']}' occupations={s['filters'].get('occupations')}\n"
+                f"[POLICY] title='{s['title']}' country={country} "
+                f"occupations={s['filters'].get('occupations')}\n"
                 f"  coverage by country (avg): {top_countries}\n"
                 f"  lowest-coverage universities: {low}"
                 f"{suggest_block}"
@@ -488,10 +520,30 @@ Write the recommendations as Markdown with these sections:
 Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
 
+def _build_policy_prompt(evidence: str, focus: Optional[str], country: Optional[str]) -> str:
+    """
+    Shorter prompt used when the ONLY source is a policy analysis. Produces just
+    a Summary and university suggestions for the analysis' country.
+    """
+    focus_line = f"\nParticular focus requested: {focus}\n" if focus else ""
+    country_line = f" for {country}" if country else ""
+    return f"""{_SYSTEM_INSTRUCTIONS}
+
+EVIDENCE FROM THE POLICY ANALYSIS:
+{evidence}
+{focus_line}
+Write the recommendations as Markdown with EXACTLY these two sections{country_line}:
+1. **Summary** — 2-3 sentences on the coverage picture for the country's universities.
+2. **Universities to strengthen** — for each low-coverage university in the country, name the specific gap skills it should add and, where the evidence lists them, which OTHER universities already teach those skills (from 'gap skills taught at OTHER universities'). Only use universities and skills explicitly present in the evidence.
+
+Do NOT add any other sections. Keep it grounded strictly in the evidence above. Output valid Markdown only."""
+
+
 # ==========================================
 # SHARED COLLECTOR
 # ==========================================
-def _collect_sources(st: Optional[str], lt: Optional[str], pol: Optional[str], tsouk: Optional[str]):
+def _collect_sources(st: Optional[str], lt: Optional[str], pol: Optional[str],
+                     tsouk: Optional[str], policy_country: Optional[str] = None):
     sources: List[Dict[str, Any]] = []
     not_found: List[str] = []
     if st:
@@ -501,7 +553,7 @@ def _collect_sources(st: Optional[str], lt: Optional[str], pol: Optional[str], t
         s = _read_longterm(lt)
         (sources.append(s) if s else not_found.append(f"long-term '{lt}'"))
     if pol:
-        s = _read_policy(pol)
+        s = _read_policy(pol, country_override=policy_country)
         (sources.append(s) if s else not_found.append(f"policy '{pol}'"))
     if tsouk:
         s = _read_tsouk_trends(tsouk)
@@ -519,6 +571,7 @@ class RecommendRequest(BaseModel):
     tsouk_title: Optional[str] = Field(None, description="FTTI trends analysis title (fetched live from the Tsouk API, no curricula).")
     focus: Optional[str] = Field(None, description="Optional extra instruction (e.g. 'focus on Greece').")
     suggest_universities: bool = Field(False, description="For short-term/long-term: also suggest OTHER universities/countries that teach the gap (missing) skills. Policy always includes this from its stored data.")
+    policy_country: Optional[str] = Field(None, description="Override the country scope for the policy analysis (keeps only universities of this country).")
     force_refresh: bool = Field(False, description="Ignore cache and regenerate with a new LLM call.")
 
 
@@ -529,14 +582,11 @@ class RecommendRequest(BaseModel):
 def generate_recommendations(req: RecommendRequest):
     """
     Give one or more titles: short-term / long-term / policy (read from the DB),
-    and/or an FTTI trends title (fetched live from the Tsouk API). The evidence is
-    summarised and sent to the Mistral LLM, which returns curriculum recommendations
-    in Markdown. With suggest_universities=true, short-term/long-term gaps are
-    enriched with OTHER universities that teach the missing skills (policy always
-    includes this from its stored missing_courses). The Markdown is CACHED in the
-    DB keyed by the exact title combination (+ focus + suggest_universities): the
-    same combo returns the cached Markdown with NO new LLM call. Set
-    force_refresh=true to regenerate.
+    and/or an FTTI trends title (fetched live from the Tsouk API). Use policy_country
+    to force the policy scope to one country. When ONLY policy_title is given, a
+    shorter prompt is used: Summary + universities for the country. The Markdown is
+    CACHED keyed by the exact title combination (+ focus + suggest_universities +
+    policy_country). Set force_refresh=true to regenerate.
     """
     _ensure_rec_schema()
 
@@ -547,7 +597,7 @@ def generate_recommendations(req: RecommendRequest):
         )
 
     key = _combo_key(req.shortterm_title, req.longterm_title, req.policy_title,
-                     req.tsouk_title, req.focus, req.suggest_universities)
+                     req.tsouk_title, req.focus, req.suggest_universities, req.policy_country)
 
     # 1) Cache hit?
     if not req.force_refresh:
@@ -572,14 +622,22 @@ def generate_recommendations(req: RecommendRequest):
 
     # 2) Collect evidence
     sources, not_found = _collect_sources(
-        req.shortterm_title, req.longterm_title, req.policy_title, req.tsouk_title
+        req.shortterm_title, req.longterm_title, req.policy_title, req.tsouk_title,
+        policy_country=req.policy_country
     )
     if not sources:
         raise HTTPException(status_code=404, detail=f"No saved analyses found for: {', '.join(not_found)}.")
 
     evidence = _build_evidence(sources)
-    uni_suggestions = _build_university_suggestions(sources) if req.suggest_universities else ""
-    prompt = _build_prompt(evidence, req.focus, uni_suggestions)
+
+    # Policy-only analyses get a shorter prompt: Summary + university suggestions.
+    is_policy_only = (len(sources) == 1 and sources[0]["type"] == "policy")
+    if is_policy_only:
+        policy_country = sources[0]["filters"].get("country")
+        prompt = _build_policy_prompt(evidence, req.focus, policy_country)
+    else:
+        uni_suggestions = _build_university_suggestions(sources) if req.suggest_universities else ""
+        prompt = _build_prompt(evidence, req.focus, uni_suggestions)
 
     # 3) LLM call
     try:
@@ -622,6 +680,7 @@ def generate_recommendations(req: RecommendRequest):
         "not_found": not_found,
         "focus": req.focus,
         "suggest_universities": req.suggest_universities,
+        "policy_country": req.policy_country,
         "recommendations": recommendations_md,
     }
 
@@ -653,9 +712,11 @@ def preview_evidence(
     policy_title: Optional[str] = Query(None),
     tsouk_title: Optional[str] = Query(None),
     suggest_universities: bool = Query(False),
+    policy_country: Optional[str] = Query(None),
 ):
     """Debug helper: shows the evidence block (and optional university suggestions) without calling the LLM."""
-    sources, not_found = _collect_sources(shortterm_title, longterm_title, policy_title, tsouk_title)
+    sources, not_found = _collect_sources(shortterm_title, longterm_title, policy_title,
+                                          tsouk_title, policy_country=policy_country)
     if not sources:
         raise HTTPException(status_code=404, detail=f"No saved analyses found for: {', '.join(not_found)}.")
     return {
