@@ -432,26 +432,29 @@ def _build_evidence(sources: List[Dict[str, Any]]) -> str:
                     f"  {s.get('empty_reason', 'No universities for this country in the analysis.')}"
                 )
                 continue
-            top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in _trim(s["countries"], 5)]
-            low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)[:5]
-            low = [f"{u['university']} {u['coverage_score']}%" for u in low_unis]
+            top_countries = [f"{c['country']} ({c['avg_coverage']}%)" for c in s["countries"]]
+            low_unis = sorted(s["universities"], key=lambda x: x["coverage_score"] or 0)
+            low = [f"{u['university']} {u['coverage_score']}% "
+                   f"(present={u.get('present')}, missing={u.get('missing')})" for u in low_unis]
 
+            # ALL missing skills + where they are taught elsewhere (no trimming)
             suggest_lines = []
-            for u in low_unis[:3]:
+            for u in low_unis:
                 mc = u.get("missing_courses") or {}
                 if isinstance(mc, dict) and mc:
-                    for skill, courses in list(mc.items())[:3]:
-                        clist = courses[:2] if isinstance(courses, list) else []
-                        if clist:
-                            suggest_lines.append(f"    - '{skill}' taught at: {clist}")
-            suggest_block = ("\n  gap skills taught at OTHER (model) universities:\n" +
+                    suggest_lines.append(f"    [{u['university']}] missing skills and where taught:")
+                    for skill, courses in mc.items():
+                        clist = courses if isinstance(courses, list) else []
+                        where = clist if clist else ["(not taught anywhere in the dataset)"]
+                        suggest_lines.append(f"      - '{skill}' -> {where}")
+            suggest_block = ("\n  gap skills per university (and OTHER model universities that teach them):\n" +
                              "\n".join(suggest_lines)) if suggest_lines else ""
 
             parts.append(
                 f"[POLICY] TARGET_COUNTRY={country} title='{s['title']}' "
                 f"occupations={s['filters'].get('occupations')}\n"
                 f"  coverage in TARGET country (avg): {top_countries}\n"
-                f"  lowest-coverage universities IN {country}: {low}"
+                f"  universities IN {country} (coverage): {low}"
                 f"{suggest_block}"
             )
         elif s["type"] == "tsouk-trends":
@@ -528,29 +531,50 @@ Write the recommendations as Markdown with these sections:
 {extra_section}
 Keep it grounded strictly in the evidence above. Output valid Markdown only."""
 
-
 def _build_policy_prompt(evidence: str, focus: Optional[str], country: Optional[str]) -> str:
+    """
+    Policy-only prompt. Turns the gap analysis into a concrete PROPOSED CURRICULUM
+    (a study programme) for the low-coverage universities of the target country:
+    proposed courses that cover the missing skills, grouped into a coherent
+    programme, citing model universities where those skills are already taught.
+    """
     focus_line = f"\nParticular focus requested: {focus}\n" if focus else ""
     target = country or "the target country"
     return f"""{_SYSTEM_INSTRUCTIONS}
 
 CRITICAL CONTEXT:
-- The TARGET country of this analysis is: {target}.
-- ALL recommendations must be about universities IN {target} ONLY.
-- The evidence may mention universities in OTHER countries. Those appear ONLY
-  because they already teach a gap skill — they are MODELS to learn from, NOT
-  the subject of the recommendations. NEVER tell a university outside {target}
-  to change anything.
+- The TARGET country is: {target}. All proposals are for universities IN {target} ONLY.
+- The evidence lists, per university in {target}, the MISSING skills and — where
+  available — OTHER (model) universities (in any country) that already teach each
+  missing skill. Those model universities are references to learn from, NOT the
+  subject of the proposal. Never propose changes to universities outside {target}.
 
 EVIDENCE FROM THE POLICY ANALYSIS:
 {evidence}
 {focus_line}
-Write the recommendations as Markdown with EXACTLY these two sections:
-1. **Summary** — 2-3 sentences on the coverage picture for {target}'s universities.
-2. **Universities to strengthen in {target}** — for each low-coverage university IN {target}, list the specific gap skills it should add. For each gap skill, if the evidence's 'gap skills taught at OTHER (model) universities' names a university (in any country) that already teaches it, cite that university as a model to learn from. Only recommend CHANGES to universities in {target}; other universities are cited only as models.
+Your task: design a PROPOSED STUDY PROGRAMME (curriculum) for the low-coverage
+universities in {target} that closes the identified skill gaps. Base every course
+strictly on the missing skills in the evidence — do not invent skills.
 
-Do NOT add any other sections. Do NOT recommend changes to universities outside {target}. Keep it grounded strictly in the evidence above. Output valid Markdown only."""
+Write the output as Markdown with these sections:
 
+1. **Summary** — 2-3 sentences on the coverage gap in {target} and what the
+   proposed programme aims to fix.
+
+2. **Proposed curriculum** — a list of proposed COURSES. For each course give:
+   - **Course title** (a sensible academic name)
+   - **Skills covered** — the specific MISSING skills from the evidence it teaches
+     (group several related missing skills into one course where it makes sense)
+   - **Model** — if the evidence names a university (any country) that already
+     teaches these skills, cite it as a reference; otherwise write "no existing model in dataset".
+   Group the courses so that together they cover as many of the missing skills as
+   possible. Order them from most foundational to most advanced.
+
+3. **Coverage note** — one or two sentences on which universities in {target} this
+   programme is for and roughly how much of their gap it addresses.
+
+Every skill you mention MUST appear in the evidence. Do not add other sections.
+Output valid Markdown only."""
 
 # ==========================================
 # SHARED COLLECTOR
@@ -781,6 +805,7 @@ def list_recommendations():
     finally:
         db.close()
 
+
 @router.delete("/delete", summary="Delete a cached recommendation by id or by the same inputs")
 def delete_recommendation(
     id: Optional[int] = Query(None, description="Delete by row id (from /list)."),
@@ -822,6 +847,7 @@ def delete_recommendation(
         return {"deleted": True, "id": deleted_id}
     finally:
         db.close()
+
 
 @router.get("/preview", summary="Preview the evidence that would be sent to the LLM (no LLM call)")
 def preview_evidence(
