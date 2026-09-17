@@ -979,6 +979,51 @@ def delete_university_by_id(university_id: int, db_config: Dict[str, Any]) -> Di
             pass
 
 
+def create_or_get_university(db_config: Dict[str, Any], university_name: str, country: str) -> Dict[str, Any]:
+    """Create a University row (name+country) if it does not exist, else return the
+    existing one. Mirrors the (university_name, country) UNIQUE key. Returns the row
+    plus a `created` flag so callers can tell new from existing."""
+    name = (university_name or "").strip()
+    ctry = (country or "").strip()
+    if not name:
+        raise ValueError("university_name is required")
+    conn = mysql.connector.connect(**db_config)
+    conn.autocommit = False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT university_id FROM University WHERE university_name = %s AND country = %s LIMIT 1",
+            (name, ctry or "Unknown"),
+        )
+        row = cur.fetchone()
+        if row:
+            uid = int(row[0])
+            created = False
+        else:
+            cur.execute(
+                "INSERT INTO University (university_name, country) VALUES (%s, %s)",
+                (name, ctry or "Unknown"),
+            )
+            uid = int(cur.lastrowid)
+            created = True
+            conn.commit()
+        cur.close()
+        return {
+            "university_id": uid,
+            "university_name": name,
+            "country": ctry or "Unknown",
+            "created": created,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def list_universities(db_config: Dict[str, Any], country: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return universities that have saved curriculum data, with per-university counts."""
     conn = mysql.connector.connect(**db_config)

@@ -126,6 +126,7 @@ from database import (
     delete_program_by_id,
     delete_university_by_id,
     list_universities,
+    create_or_get_university,
     get_university_curriculum,
     _labels_to_course,
     _normalize_text_for_ner,
@@ -1481,6 +1482,31 @@ def get_universities(country: Optional[str] = Query(None, description="Optional 
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to list universities: {e}")
     return JSONResponse(content=_json_safe({"universities": rows}))
+
+
+class CreateUniversityRequest(BaseModel):
+    university_name: str = Field(..., description="University name")
+    country: Optional[str] = Field(None, description="Country (stored as 'Unknown' if omitted)")
+
+
+@app.post(
+    "/universities",
+    tags=["PDF", "Courses"],
+    summary="Create a university (name + country), or return it if it already exists",
+)
+def create_university(payload: CreateUniversityRequest = Body(...)):
+    """Get-or-create a University row so an education user can register their
+    institution before uploading any curricula. Idempotent on (name, country)."""
+    if not is_database_connected(DB_CONFIG):
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    name = (payload.university_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="university_name is required.")
+    try:
+        row = create_or_get_university(DB_CONFIG, name, payload.country)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to create university: {e}")
+    return JSONResponse(content=_json_safe(row))
 
 
 @app.get(
