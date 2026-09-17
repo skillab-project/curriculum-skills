@@ -347,6 +347,30 @@ def gap_by_title_runs():
         db.close()
 
 
+@full_pipeline_router.delete(
+    "/gap-by-title/runs/{run_id}",
+    summary="Delete a saved title-gap analysis and all its records"
+)
+def delete_gap_by_title_run(run_id: str):
+    """Delete every saved skill record for this long-term analysis run_id.
+    404 if no run matches."""
+    _ensure_title_schema()
+    db = _TitleSession()
+    try:
+        deleted = (
+            db.query(TitleGapResult)
+            .filter(TitleGapResult.run_id == run_id)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"No analysis found for run_id '{run_id}'.")
+        logger.info("🗑️  Deleted %d records for title-gap run_id=%s.", deleted, run_id)
+        return {"deleted": deleted, "run_id": run_id}
+    finally:
+        db.close()
+
+
 @full_pipeline_router.get(
     "/gap-by-title/results",
     summary="Read saved title-gap results by title"

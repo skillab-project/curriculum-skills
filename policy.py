@@ -392,6 +392,22 @@ def list_runs(db: Session = Depends(get_db)):
     return {"runs": list(seen.values())}
 
 
+@router.delete("/policy/runs/{run_id}", summary="Delete an analysis run and all its records")
+def delete_run(run_id: str, db: Session = Depends(get_db)):
+    """Delete every per-university record stored under this run_id.
+    Returns 404 if no run matches."""
+    deleted = (
+        db.query(PolicyRecommendation)
+        .filter(PolicyRecommendation.run_id == run_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"No analysis found for run_id '{run_id}'.")
+    logger.info(f"🗑️  Deleted {deleted} records for policy run_id={run_id}.")
+    return {"deleted": deleted, "run_id": run_id}
+
+
 @router.get("/policy/results", summary="Get per-university recommendations by title")
 def get_results(
     db: Session = Depends(get_db),

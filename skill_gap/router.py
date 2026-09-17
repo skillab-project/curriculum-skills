@@ -300,6 +300,25 @@ def list_runs():
         db.close()
 
 
+@router.delete("/runs/{run_id}", summary="[Short-Term] Delete an analysis run and all its skills", tags=["Short-Term Analysis"])
+def delete_run(run_id: str):
+    """Delete every skill record stored under this run_id. 404 if none match."""
+    db = SessionLocal()
+    try:
+        deleted = (
+            db.query(SkillGapResult)
+            .filter(SkillGapResult.run_id == run_id)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"No analysis found for run_id '{run_id}'.")
+        logger.info(f"🗑️  Deleted {deleted} records for skill-gap run_id={run_id}.")
+        return {"deleted": deleted, "run_id": run_id}
+    finally:
+        db.close()
+
+
 @router.get("/results", summary="[Short-Term] Get skill gap results by title", tags=["Short-Term Analysis"])
 def get_results(
     title: str = Query(None, description="Fetch the results of the analysis with this title"),
