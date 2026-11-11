@@ -5,6 +5,7 @@ from typing import List, Optional
 from datetime import date
 
 from fastapi import APIRouter, Depends, BackgroundTasks, Query, Body, HTTPException
+import running_runs
 from sqlalchemy.orm import Session, declarative_base, sessionmaker, scoped_session
 from sqlalchemy import Column, Integer, String, JSON, TIMESTAMP, Float, Date, text, create_engine
 from pydantic import BaseModel, Field
@@ -243,6 +244,7 @@ def background_task_wrapper(run_id: str, payload: PolicyAnalyzeRequest, analysis
         run_policy_analysis_logic(db, run_id, payload, analysis_date)
     finally:
         db.close()
+        running_runs.finish("policy", run_id)
 
 
 def _parse_date(payload: PolicyAnalyzeRequest):
@@ -270,7 +272,7 @@ def trigger_analysis(
     """
     _ensure_policy_schema_once()
 
-    if _title_exists(payload.title):
+    if _title_exists(payload.title) or running_runs.title_running("policy", payload.title):
         raise HTTPException(
             status_code=409,
             detail=f"An analysis with title '{payload.title}' already exists. Use a different title."
@@ -279,6 +281,18 @@ def trigger_analysis(
     analysis_date = _parse_date(payload)
     run_id = str(uuid.uuid4())
 
+    running_runs.start("policy", run_id, {
+        "title": payload.title,
+        "description": payload.description,
+        "date": analysis_date.isoformat() if analysis_date else None,
+        "filters": {
+            "occupations": payload.occupations,
+            "threshold": payload.threshold,
+            "top_n": payload.top_n,
+            "country": payload.country,
+        },
+        "universities_count": 0,
+    })
     background_tasks.add_task(background_task_wrapper, run_id, payload, analysis_date)
 
     return {
@@ -302,7 +316,7 @@ def trigger_analysis_sync(
     """Same logic but blocking; returns the full result. Rejects duplicate titles."""
     _ensure_policy_schema_once()
 
-    if _title_exists(payload.title):
+    if _title_exists(payload.title) or running_runs.title_running("policy", payload.title):
         raise HTTPException(
             status_code=409,
             detail=f"An analysis with title '{payload.title}' already exists. Use a different title."
@@ -343,9 +357,15 @@ def trigger_analysis_sync(
 @router.get("/policy/status/{run_id}", summary="Check if an analysis run has finished")
 def get_run_status(run_id: str, db: Session = Depends(get_db)):
     count = db.query(PolicyRecommendation).filter_by(run_id=run_id).count()
+    if count > 0:
+        status = "completed"
+    elif running_runs.is_running("policy", run_id):
+        status = "running"
+    else:
+        status = "pending"  # unknown run, or it finished without saving anything
     return {
         "run_id": run_id,
-        "status": "completed" if count > 0 else "pending",
+        "status": status,
         "universities_analyzed": count
     }
 
@@ -385,17 +405,22 @@ def list_runs(db: Session = Depends(get_db)):
                     "top_n": r.top_n,
                     "country": r.filter_country,
                 },
-                "universities_count": 0
+                "universities_count": 0,
+                "status": "completed",
             }
         seen[r.run_id]["universities_count"] += 1
 
-    return {"runs": list(seen.values())}
+    # In-progress analyses have no rows yet — list them first, marked as running.
+    running = [e for e in running_runs.listing("policy") if e["run_id"] not in seen]
+    return {"runs": running + list(seen.values())}
 
 
 @router.delete("/policy/runs/{run_id}", summary="Delete an analysis run and all its records")
 def delete_run(run_id: str, db: Session = Depends(get_db)):
     """Delete every per-university record stored under this run_id.
     Returns 404 if no run matches."""
+    if running_runs.is_running("policy", run_id):
+        raise HTTPException(status_code=409, detail="This analysis is still running and cannot be deleted yet.")
     deleted = (
         db.query(PolicyRecommendation)
         .filter(PolicyRecommendation.run_id == run_id)
@@ -439,6 +464,8 @@ def get_results(
 
         results = q.all()
         if not results:
+            if title is not None and running_runs.title_running("policy", title):
+                return {"message": "This analysis is still running. Check back shortly.", "status": "running", "data": []}
             return {"message": "No results found for the given filters.", "data": []}
         return results
 

@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, Bool
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
 from config import DB_CONFIG
+import running_runs
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,7 @@ def gap_by_title(req: TitleGapRequest):
 
     source_title = req.source_title or req.title
 
-    if _title_exists(req.title):
+    if _title_exists(req.title) or running_runs.title_running("longterm", req.title):
         raise HTTPException(
             status_code=409,
             detail=f"An analysis with title '{req.title}' already exists. Use a different title."
@@ -246,6 +247,24 @@ def gap_by_title(req: TitleGapRequest):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date (day/month/year).")
 
+    # Register as running for the whole computation so /gap-by-title/runs shows
+    # it (status "running") even if the caller navigates away meanwhile.
+    run_id = str(uuid.uuid4())
+    running_runs.start("longterm", run_id, {
+        "title": req.title,
+        "source_title": source_title,
+        "description": req.description,
+        "date": analysis_date.isoformat() if analysis_date else None,
+        "filters": {"country": req.country, "esco_threshold": req.esco_threshold},
+        "skills_count": None,
+    })
+    try:
+        return _run_gap_by_title(req, run_id, source_title, analysis_date)
+    finally:
+        running_runs.finish("longterm", run_id)
+
+
+def _run_gap_by_title(req: TitleGapRequest, run_id: str, source_title: str, analysis_date):
     jobs = _fetch_policies_by_title(source_title)
     if not jobs:
         raise HTTPException(status_code=404, detail=f"No policy jobs found for source title '{source_title}'.")
@@ -256,7 +275,6 @@ def gap_by_title(req: TitleGapRequest):
 
     curric = _check_skill_urls_in_curriculum(list(pool.keys()), country=req.country)
 
-    run_id = str(uuid.uuid4())
     db = _TitleSession()
     try:
         for url, info in pool.items():
@@ -340,9 +358,12 @@ def gap_by_title_runs():
                         "esco_threshold": r.esco_threshold,
                     },
                     "skills_count": 0,
+                    "status": "completed",
                 }
             seen[r.run_id]["skills_count"] += 1
-        return {"runs": list(seen.values())}
+        # In-progress analyses have no rows yet — list them first, marked as running.
+        running = [e for e in running_runs.listing("longterm") if e["run_id"] not in seen]
+        return {"runs": running + list(seen.values())}
     finally:
         db.close()
 
@@ -354,6 +375,8 @@ def gap_by_title_runs():
 def delete_gap_by_title_run(run_id: str):
     """Delete every saved skill record for this long-term analysis run_id.
     404 if no run matches."""
+    if running_runs.is_running("longterm", run_id):
+        raise HTTPException(status_code=409, detail="This analysis is still running and cannot be deleted yet.")
     _ensure_title_schema()
     db = _TitleSession()
     try:
@@ -391,6 +414,8 @@ def gap_by_title_results(
             q = q.filter(TitleGapResult.in_curriculum == in_curriculum)
         rows = q.all()
         if not rows:
+            if running_runs.title_running("longterm", title):
+                return {"message": "This analysis is still running. Check back shortly.", "status": "running", "data": []}
             return {"message": f"No results found for title '{title}'.", "data": []}
 
         first = rows[0]

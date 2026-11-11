@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sqlalchemy.orm import Session
-from recommendation_system.backend.models import University, Course, DegreeProgram
+from recommendation_system.backend.models import University, Course, DegreeProgram, CourseSkill, Skill
 import json
 import re
 import logging
@@ -32,6 +32,148 @@ class CourseRecommender:
             SQLAlchemy session used to query models (University, Course, etc.).
         """
         self.db = db
+        # Lazily-filled bulk snapshot (see _load_bulk); avoids per-course lazy loads.
+        self._bulk = None
+
+    # ==========================================================
+    # Bulk loading (performance)
+    # ==========================================================
+    @staticmethod
+    def _name_key(name: str) -> str:
+        # MySQL's default *_ci collation compares names case-insensitively and
+        # ignores trailing spaces; mirror that for the in-memory lookups.
+        return (name or "").rstrip().lower()
+
+    def _load_bulk(self) -> Dict[str, Any]:
+        """Load everything the candidate profiles need in three queries,
+        selecting only the needed columns (Course has many large text columns).
+
+        Replaces walking University.courses -> Course.skills -> CourseSkill.skill
+        lazily, which issued one query per course and per skill and dominated
+        the response time of the course-recommendation endpoints.
+        """
+        if self._bulk is not None:
+            return self._bulk
+
+        univs = (
+            self.db.query(University.university_id, University.university_name)
+            .order_by(University.university_id)
+            .all()
+        )
+        courses = (
+            self.db.query(Course.course_id, Course.university_id, Course.lesson_name, Course.degree_titles)
+            .order_by(Course.university_id, Course.course_id)
+            .all()
+        )
+        skill_rows = (
+            self.db.query(CourseSkill.course_id, Skill.skill_name)
+            .join(Skill, Skill.skill_id == CourseSkill.skill_id)
+            .all()
+        )
+
+        skills_by_course: Dict[int, set] = defaultdict(set)
+        for course_id, skill_name in skill_rows:
+            name = (skill_name or "").strip()
+            if name:
+                skills_by_course[course_id].add(name)
+
+        courses_by_univ: Dict[int, list] = defaultdict(list)
+        first_course_by_name: Dict[str, int] = {}
+        for c in courses:
+            courses_by_univ[c.university_id].append(c)
+            key = self._name_key(c.lesson_name)
+            # same as `.filter(lesson_name == name).first()`: lowest course_id wins
+            if key and key not in first_course_by_name:
+                first_course_by_name[key] = c.course_id
+
+        self._bulk = {
+            "univs": univs,
+            "courses_by_univ": courses_by_univ,
+            "skills_by_course": skills_by_course,
+            "first_course_by_name": first_course_by_name,
+        }
+        return self._bulk
+
+    def _course_specific_skills(self, cname: str) -> set:
+        """Skills of the (first) course with this name — in-memory equivalent of
+        querying Course by lesson_name and walking its skills."""
+        bulk = self._load_bulk()
+        course_id = bulk["first_course_by_name"].get(self._name_key(cname))
+        if course_id is None:
+            return set()
+        return set(bulk["skills_by_course"].get(course_id, ()))
+
+    def _degree_profiles_from_rows(self, univ_id: int, course_rows, skills_by_course) -> List[Dict[str, Any]]:
+        grouped = defaultdict(lambda: {
+            "university_id": univ_id,
+            "program_id": -1,
+            "degree_title": "",
+            "degree_type": "Other",
+            "skills": set(),
+            "courses": set(),
+        })
+        for course in course_rows:
+            titles = self._parse_titles(course.degree_titles)
+            if not titles:
+                continue
+            lesson_name = (course.lesson_name or "").strip()
+            course_skills = skills_by_course.get(course.course_id, set())
+            for title in titles:
+                clean_title = title.strip()
+                if not clean_title:
+                    continue
+                item = grouped[clean_title]
+                item["degree_title"] = clean_title
+                lower = clean_title.lower()
+                if any(x in lower for x in ["master", "msc", "m.sc", "ma"]):
+                    item["degree_type"] = "MSc/MA"
+                elif any(x in lower for x in ["bachelor", "bsc", "b.sc", "ba"]):
+                    item["degree_type"] = "BSc/BA"
+                if lesson_name:
+                    item["courses"].add(lesson_name)
+                item["skills"].update(course_skills)
+        return [{
+            "university_id": item["university_id"],
+            "program_id": item["program_id"],
+            "degree_title": item["degree_title"],
+            "degree_type": item["degree_type"],
+            "skills": sorted(item["skills"]),
+            "courses": sorted(item["courses"]),
+        } for item in grouped.values()]
+
+    def build_all_candidate_profiles(
+        self,
+        exclude_univ_id: Optional[int] = None,
+        include_university_candidates: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Fast equivalent of looping over get_all_universities() and calling
+        build_degree_profiles (+ build_university_candidate_profile) for each."""
+        bulk = self._load_bulk()
+        skills_by_course = bulk["skills_by_course"]
+        profiles: List[Dict[str, Any]] = []
+        for univ_id, univ_name in bulk["univs"]:
+            if exclude_univ_id is not None and univ_id == exclude_univ_id:
+                continue
+            rows = bulk["courses_by_univ"].get(univ_id, [])
+            profiles.extend(self._degree_profiles_from_rows(univ_id, rows, skills_by_course))
+            if not include_university_candidates:
+                continue
+            skills, courses = set(), set()
+            for c in rows:
+                lesson_name = (c.lesson_name or "").strip()
+                if lesson_name:
+                    courses.add(lesson_name)
+                skills.update(skills_by_course.get(c.course_id, ()))
+            if courses:
+                profiles.append({
+                    "university_id": univ_id,
+                    "program_id": -1,
+                    "degree_title": univ_name or "",
+                    "degree_type": "Any",
+                    "skills": sorted(skills),
+                    "courses": sorted(courses),
+                })
+        return profiles
 
     # ==========================================================
     # Helper methods
@@ -100,6 +242,13 @@ class CourseRecommender:
             re.sub(r"[^a-zA-Z0-9 \-&\u0370-\u03FF\u1F00-\u1FFF]", "", str(t)).strip()
             for t in titles if t
         ]
+
+    def _with_course_details(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Attach description/objectives/outcomes/content to the given results
+        (looked up from wherever the course exists, any university)."""
+        for item in results:
+            item.update(self.get_course_details_by_name(item["course_name"]))
+        return results
 
     def get_course_details_by_name(self, course_name: str, target_univ_id: Optional[int] = None) -> Dict[str, str]:
         """
@@ -379,15 +528,7 @@ class CourseRecommender:
                 if not cname or cname in target_courses:
                     continue
 
-                db_course = self.db.query(Course).filter(Course.lesson_name == cname).first()
-                course_specific_skills = set()
-                if db_course:
-                    # Extract explicit skills attached to this course (ORM relation)
-                    for cs in getattr(db_course, "skills", []):
-                        if getattr(cs, "skill", None):
-                            skill_name = (cs.skill.skill_name or "").strip()
-                            if skill_name:
-                                course_specific_skills.add(skill_name)
+                course_specific_skills = self._course_specific_skills(cname)
 
                 # If we found any skills (from degree-level or course-level), register the course
                 if course_specific_skills or deg_skills:
@@ -449,23 +590,19 @@ class CourseRecommender:
                 ), 3
             )
 
-            # Fetch textual course details from wherever the course exists
-            # (the candidate courses come from *other* universities).
-            course_details = self.get_course_details_by_name(cname)
-
             results.append({
                 "course_name": cname,
                 "score": total_score,
                 "new_skills": sorted(list(new_skills)),
                 "compatible_skills": sorted(list(compat_skills)),
-                "description": course_details["description"],
-                "objectives": course_details["objectives"],
-                "learning_outcomes": course_details["learning_outcomes"],
-                "course_content": course_details["course_content"],
             })
 
-        # Return top-N courses sorted by score (descending)
-        return sorted(results, key=lambda x: x["score"], reverse=True)[:top_n]
+        # Return top-N courses sorted by score (descending). Text details are
+        # fetched only for the courses actually returned (one query each)
+        # instead of for every candidate — they don't affect the score.
+        return self._with_course_details(
+            sorted(results, key=lambda x: x["score"], reverse=True)[:top_n]
+        )
 
     # ==========================================================
     # 4) Suggest courses for a new degree
@@ -504,14 +641,7 @@ class CourseRecommender:
                 if not cname:
                     continue
 
-                db_course = self.db.query(Course).filter(Course.lesson_name == cname).first()
-                course_specific_skills = set()
-                if db_course:
-                    for cs in getattr(db_course, "skills", []):
-                        if getattr(cs, "skill", None):
-                            skill_name = (cs.skill.skill_name or "").strip()
-                            if skill_name:
-                                course_specific_skills.add(skill_name)
+                course_specific_skills = self._course_specific_skills(cname)
 
                 if course_specific_skills or deg_skills:
                     total_skills = deg_skills.union(course_specific_skills)
@@ -562,18 +692,13 @@ class CourseRecommender:
                 ), 3
             )
 
-            # Course details are retrieved without restricting university (new degree context)
-            course_details = self.get_course_details_by_name(cname, target_univ_id=None)
-
             results.append({
                 "course_name": cname,
                 "score": total_score,
                 "new_skills": sorted(list(new_skills)),
                 "compatible_skills": sorted(list(compat_skills)),
-                "description": course_details["description"],
-                "objectives": course_details["objectives"],
-                "learning_outcomes": course_details["learning_outcomes"],
-                "course_content": course_details["course_content"],
             })
 
-        return sorted(results, key=lambda x: x["score"], reverse=True)[:top_n]
+        return self._with_course_details(
+            sorted(results, key=lambda x: x["score"], reverse=True)[:top_n]
+        )
